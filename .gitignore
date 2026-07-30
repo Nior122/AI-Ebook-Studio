@@ -60,3 +60,8 @@ backend/var/
 
 # --- Misc -------------------------------------------------------------------
 .cache/
+
+backend_err.txt
+backend_log.txt
+tsc-check.txt
+tsc-errors.txt
