@@ -8,14 +8,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { IconSparkles, IconBook, IconCheck, IconX } from "@/components/ui/icons";
 
-function minimizeIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  );
-}
-
 const TIMELINE = [
   { at: 0, label: "Planning manuscript" },
   { at: 5, label: "Analyzing your concept" },
@@ -40,7 +32,6 @@ export default function GenerationProgressPage({
   const redirectUrl = searchParams.get("redirect");
 
   const [job, setJob] = useState<JobResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [startTime] = useState(Date.now());
   const [minimized, setMinimized] = useState(false);
   const doneRef = useRef(false);
@@ -63,11 +54,10 @@ export default function GenerationProgressPage({
           return;
         }
         timer = setTimeout(poll, 1200);
-      } catch (err: unknown) {
-        if (!cancelled) {
-          setError((err as Error).message ?? "Cannot reach the server");
-          timer = setTimeout(poll, 3000);
-        }
+       } catch {
+         if (!cancelled) {
+           timer = setTimeout(poll, 3000);
+         }
       }
     };
 

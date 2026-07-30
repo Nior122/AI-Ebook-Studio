@@ -5,7 +5,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useUser, useClerk } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
@@ -88,7 +88,6 @@ function SidebarContent({ pathname, onNavigate }: { pathname: string; onNavigate
 function UserMenu() {
   const { user } = useUser();
   const { signOut } = useClerk();
-  const router = useRouter();
   const [open, setOpen] = useState(false);
   const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "U";
   const initials = displayName

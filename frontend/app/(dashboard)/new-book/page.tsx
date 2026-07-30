@@ -8,7 +8,6 @@ import { Input, Select, Textarea } from "@/components/ui/input";
 import { Field } from "@/components/ui/field";
 import { Dialog, DialogHeader, DialogFooter } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { generationApi, WORD_COUNT_PRESETS, type BookSetup } from "@/lib/api/generation";
 import { ApiError } from "@/lib/api";
@@ -92,7 +91,6 @@ export default function NewBookPage() {
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [clarifyQuestions, setClarifyQuestions] = useState<Array<{ id: string; question: string; placeholder: string }>>([]);
   const [clarifyAnswers, setClarifyAnswers] = useState<Record<string, string>>({});
-  const [jobId, setJobId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
@@ -147,11 +145,10 @@ export default function NewBookPage() {
       ai: { creativity, speed: "balanced", provider, model: MODEL_MAP[provider] || "openai/gpt-4o-mini" },
       special_instructions: { instructions: instructions.trim() },
     };
-    setStep("submitting");
-    try {
+     setStep("submitting");
+     try {
       const res = await generationApi.setup(setup);
       if (res.job_id) {
-        setJobId(res.job_id);
         toast({ title: "Generation started", variant: "success" });
         router.push(`/generating/${res.job_id}?redirect=/workspace/${res.project_id}`);
       } else {
@@ -233,7 +230,6 @@ export default function NewBookPage() {
       }
 
       if (res.job_id) {
-        setJobId(res.job_id);
         toast({ title: "Generation started", variant: "success" });
         router.push(`/generating/${res.job_id}?redirect=/workspace/${res.project_id}`);
       } else {
