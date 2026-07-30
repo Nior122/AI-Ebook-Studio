@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  foundation:
+    name: Foundation checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required directories
+        run: |
+          test -d frontend
+          test -d backend
+          test -d docs
+          test -d prompts
+          test -d shared
+          test -d database

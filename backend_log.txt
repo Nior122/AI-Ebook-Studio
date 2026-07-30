@@ -1,0 +1,4 @@
+2026-07-26T05:48:03.618697Z [info     ] application_startup            app=AI Ebook Studio API environment=development
+2026-07-26T05:48:03.623370Z [info     ] job_handlers_registered
+2026-07-26T05:50:20.874549Z [info     ] http_request                   duration_ms=6.21 method=GET path=/api/v1/health status_code=200
+2026-07-26T05:51:06.970896Z [info     ] http_request                   duration_ms=1.08 method=GET path=/api/v1/health status_code=200

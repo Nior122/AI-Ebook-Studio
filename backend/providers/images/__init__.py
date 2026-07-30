@@ -1,0 +1,1 @@
+"""Future image provider adapters."""

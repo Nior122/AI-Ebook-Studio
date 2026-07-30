@@ -1,0 +1,62 @@
+# ============================================================================
+# AI Ebook Studio — root .gitignore
+# Centralized ignore rules for the whole monorepo. Per-package tweaks live in
+# frontend/.gitignore and backend/.gitignore (which inherit from here).
+# ============================================================================
+
+# --- Secrets & environment --------------------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+
+# --- OS / editor junk -------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# --- Node / Next.js ---------------------------------------------------------
+node_modules/
+.next/
+out/
+.vercel
+next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Docker / runtime data --------------------------------------------------
+pgdata/
+redis-data/
+*.log
+
+# --- Backend runtime / storage ----------------------------------------------
+var/
+backend/var/
+*.db
+!*.example.db
+
+# --- Misc -------------------------------------------------------------------
+.cache/
