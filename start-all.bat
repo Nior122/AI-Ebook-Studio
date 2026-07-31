@@ -1,21 +1,14 @@
 @echo off
-echo Starting AI Ebook Studio - Backend and Frontend...
-echo ================================================
-echo Backend will run on http://localhost:8765
-echo Frontend will run on http://localhost:3000
-echo ================================================
-echo.
+set ROOT=%~dp0
+set BACKEND_NEW=%ROOT%backend\start_backend.bat
+set FRONTEND_NEW=%ROOT%frontend\start_frontend.bat
 
-echo Starting Backend...
-start "AI Ebook Studio - Backend" cmd /c "cd /d \"%~dp0backend\" && call .venv\Scripts\activate.bat && python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --reload --log-level info"
-
+echo Starting AI Ebook Studio...
+start "AI Ebook Studio - Backend" /min cmd /k "%BACKEND_NEW%"
 timeout /t 3 /nobreak >nul
-
-echo Starting Frontend...
-start "AI Ebook Studio - Frontend" cmd /c "cd /d \"%~dp0frontend\" && npm run dev"
-
+start "AI Ebook Studio - Frontend" /min cmd /k "%FRONTEND_NEW%"
 echo.
-echo Both services are starting in separate windows.
-echo Backend: http://localhost:8765
-echo Frontend: http://localhost:3000
-pause
+echo Backend  : http://localhost:8765
+echo Frontend : http://localhost:3000
+timeout /t 5 >nul
+exit
