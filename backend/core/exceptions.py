@@ -121,6 +121,23 @@ def error_response(code: str, message: str, details: object | None = None) -> di
     }
 
 
+def _safe_error_details(errors: list[dict]) -> list[dict]:
+    """Sanitize pydantic error details so JSONResponse never crashes.
+
+    Pydantic v2 embeds the offending ``input`` value in every error; for
+    ORM-backed inputs that object is not JSON serializable. Convert any
+    non-primitive input to a truncated repr.
+    """
+    safe: list[dict] = []
+    for error in errors:
+        item = dict(error)
+        raw = item.get("input")
+        if raw is not None and not isinstance(raw, (str, int, float, bool, list, dict)):
+            item["input"] = repr(raw)[:500]
+        safe.append(item)
+    return safe
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -155,7 +172,7 @@ async def validation_exception_handler(
         content=error_response(
             code="VALIDATION_ERROR",
             message="Request validation failed.",
-            details=exc.errors(),
+            details=_safe_error_details(exc.errors()),
         ),
     )
 
@@ -170,7 +187,7 @@ async def pydantic_validation_exception_handler(
         content=error_response(
             code="INTERNAL_VALIDATION_ERROR",
             message="Internal validation failed.",
-            details=exc.errors(),
+            details=_safe_error_details(exc.errors()),
         ),
     )
 

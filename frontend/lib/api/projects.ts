@@ -36,4 +36,12 @@ export const projectsApi = {
   favorite(id: string): Promise<Project> {
     return apiClient.post<Project>(`/projects/${id}/favorite`);
   },
+
+  duplicate(id: string): Promise<Project> {
+    return apiClient.post<Project>(`/projects/${id}/duplicate`);
+  },
+
+  restore(id: string): Promise<Project> {
+    return apiClient.post<Project>(`/projects/${id}/restore`);
+  },
 };

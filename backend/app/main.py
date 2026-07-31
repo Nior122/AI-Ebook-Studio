@@ -50,6 +50,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.settings = resolved_settings
 
+    from middleware.rate_limit import RateLimitMiddleware
+
+    app.add_middleware(
+        RateLimitMiddleware,
+        enabled=resolved_settings.rate_limit_enabled,
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(

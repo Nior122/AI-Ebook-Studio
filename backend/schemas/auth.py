@@ -106,3 +106,10 @@ class MessageResponse(BaseModel):
     """Generic API message response."""
 
     message: str
+
+
+class ForgotPasswordResponse(BaseModel):
+    """Forgot-password response with an optional dev-only reset link."""
+
+    message: str
+    dev_link: str | None = None

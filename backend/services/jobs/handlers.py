@@ -16,8 +16,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.cover.engine import get_cover_engine
 from services.export.engine import get_export_engine
 from services.generation.orchestrator import generation_handler
+from services.marketing.engine import get_marketing_engine
+from services.translation.engine import get_translation_engine
 from services.jobs.enums import JobType
 from services.jobs.runner import JobHandler, ProgressCallback, register_handler
 

@@ -21,6 +21,7 @@ from schemas.auth import (
     ResetPasswordRequest,
     TokenPairResponse,
     UserResponse,
+    ForgotPasswordResponse,
 )
 from services.auth_service import (
     authenticate_user,
@@ -115,25 +116,42 @@ async def update_me(
     return await _load_user_with_profile(session, user)
 
 
-@router.post("/auth/forgot-password", response_model=MessageResponse, summary="Forgot password")
-async def forgot_password(_payload: ForgotPasswordRequest) -> MessageResponse:
-    """Prepare password reset flow without sending email in this stage."""
-    return MessageResponse(
-        message="If the email exists, password reset instructions will be prepared.",
-    )
+@router.post(
+    "/auth/forgot-password", response_model=ForgotPasswordResponse, summary="Forgot password"
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    session: DatabaseSession,
+    settings: AppSettings,
+) -> ForgotPasswordResponse:
+    """Issue a password-reset link (sent by email; also returned as dev_link outside production)."""
+    from services.auth_service import start_password_reset
+
+    result = await start_password_reset(session, payload.email, settings)
+    return ForgotPasswordResponse(**result)
 
 
 @router.post("/auth/reset-password", response_model=MessageResponse, summary="Reset password")
-async def reset_password(_payload: ResetPasswordRequest) -> MessageResponse:
-    """Prepare reset password endpoint structure for future email flow."""
-    return MessageResponse(
-        message="Password reset structure is available; email flow is not enabled yet.",
-    )
+async def reset_password(
+    payload: ResetPasswordRequest,
+    session: DatabaseSession,
+    settings: AppSettings,
+) -> MessageResponse:
+    """Complete a password reset with the emailed token."""
+    from services.auth_service import complete_password_reset
+
+    message = await complete_password_reset(session, payload.token, payload.new_password, settings)
+    return MessageResponse(message=message)
 
 
 @router.post("/auth/verify-email", response_model=MessageResponse, summary="Verify email")
-async def verify_email(_payload: EmailVerificationRequest) -> MessageResponse:
-    """Prepare email verification endpoint structure."""
-    return MessageResponse(
-        message="Email verification structure is available; email sending is not enabled yet.",
-    )
+async def verify_email(
+    payload: EmailVerificationRequest,
+    session: DatabaseSession,
+    settings: AppSettings,
+) -> MessageResponse:
+    """Verify the user email with the emailed token."""
+    from services.auth_service import verify_email_flow
+
+    message = await verify_email_flow(session, payload.token, settings)
+    return MessageResponse(message=message)

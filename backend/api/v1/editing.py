@@ -61,9 +61,24 @@ async def run_review(
     user: CurrentUser,
 ) -> ChapterReviewResponse:
     result = await review_chapter(session, user, chapter_id, payload)
+    editing_session = result["session"]
+    suggestions = [SuggestionResponse.model_validate(s) for s in result["suggestions"]]
+    # Build the response from already-loaded attributes only: model_validate on
+    # the ORM object would lazy-load the `suggestions` relationship, which is
+    # illegal in async sessions (MissingGreenlet).
     return ChapterReviewResponse(
-        session=EditingSessionResponse.model_validate(result["session"]),
-        suggestions=[SuggestionResponse.model_validate(s) for s in result["suggestions"]],
+        session=EditingSessionResponse(
+            id=editing_session.id,
+            book_id=editing_session.book_id,
+            chapter_id=editing_session.chapter_id,
+            user_id=editing_session.user_id,
+            mode=editing_session.mode,
+            status=editing_session.status,
+            created_at=editing_session.created_at,
+            completed_at=editing_session.completed_at,
+            suggestions=suggestions,
+        ),
+        suggestions=suggestions,
     )
 
 

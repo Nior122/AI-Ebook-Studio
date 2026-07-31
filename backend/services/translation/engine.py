@@ -45,7 +45,7 @@ TRANSLATION_SYSTEM_PROMPT = """You are a professional literary translator. Trans
 
 Rules:
 1. Preserve ALL markdown formatting — headers (# ## ###), bold (**), italic (*), lists, etc.
-2. Preserve ALL image placeholders and captions — do not translate or modify [IMAGE], ![alt], or {img} markers.
+2. Preserve ALL image placeholders and captions — do not translate or modify [IMAGE], ![alt], or {{img}} markers.
 3. Maintain the same paragraph structure and line breaks.
 4. Preserve the tone, voice, and style of the original.
 5. Translate accurately while making the text sound natural in {target_lang}.

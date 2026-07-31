@@ -539,6 +539,8 @@ class LocalProvider(AIProvider):
         return system, user
 
     async def _translate(self, system: str, user: str) -> str:
+        from core.config import get_settings
+
         match = re.search(r"from\s+([A-Za-z]+)\s+to\s+([A-Za-z]+)", system, re.IGNORECASE)
         if not match:
             raise ProviderConfigurationError(
@@ -549,18 +551,26 @@ class LocalProvider(AIProvider):
         source_name, target_name = match.group(1).lower(), match.group(2).lower()
         source = _LANG_CODES.get(source_name, source_name[:2])
         target = _LANG_CODES.get(target_name, target_name[:2])
+        endpoint = get_settings().libretranslate_url
+        if not endpoint:
+            raise ProviderConfigurationError(
+                "Translation needs an AI provider key, or a LibreTranslate server URL "
+                "(LIBRETRANSLATE_URL). Add one in Settings to translate this book.",
+                provider=self.PROVIDER,
+                retryable=False,
+            )
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
-                    "https://libretranslate.com/translate",
+                    endpoint.rstrip("/") + "/translate",
                     json={"q": user, "source": source, "target": target, "format": "text"},
                 )
                 response.raise_for_status()
                 data = response.json()
         except Exception as exc:
             raise ProviderConfigurationError(
-                "The free LibreTranslate service is unreachable right now. "
-                "Configure an AI provider key (Settings → AI) to translate this book.",
+                "The configured LibreTranslate server is unreachable. Check "
+                "LIBRETRANSLATE_URL or configure an AI provider key to translate this book.",
                 provider=self.PROVIDER,
                 retryable=True,
             ) from exc

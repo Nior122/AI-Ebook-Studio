@@ -201,10 +201,16 @@ async def generation_handler(
     )
 
     # Phase 3: Write chapters (23% — 85%)
+    # Resume-friendly: chapters that already have content are kept as-is,
+    # so re-running generation continues where an interrupted run stopped
+    # instead of discarding finished work.
     existing = await list_writing_chapters(session, user, wbook.id)
+    keep_by_number: dict[int, WritingChapter] = {}
     for ch in existing:
+        if ch.content and ch.status not in ("planned", "outlining"):
+            keep_by_number[ch.chapter_number] = ch
+            continue
         ch.deleted_at = datetime.now(UTC)
-        session.add(ch)
     await session.flush()
 
     ch_plans = getattr(blueprint, "chapters", []) or []
@@ -226,6 +232,18 @@ async def generation_handler(
 
         pct = int(23 + per_pct * i)
         await progress(pct, f"Writing Chapter {chapter_num}: {title[:60]}")
+
+        kept = keep_by_number.get(chapter_num)
+        if kept is not None:
+            kept.title = title
+            kept.purpose = objective
+            kept.objective = summary[:128]
+            kept.summary = summary[:255]
+            kept.target_word_count = target_wc
+            kept.status = "draft"
+            total_words += kept.actual_word_count or 0
+            await session.flush()
+            continue
 
         chapter = WritingChapter(
             book_id=wbook.id,

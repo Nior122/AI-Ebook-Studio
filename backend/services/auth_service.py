@@ -70,6 +70,14 @@ async def register_user(
 
     tokens = await issue_token_pair(session, user, settings, request)
     await session.commit()
+
+    if getattr(settings, "require_email_verification", False):
+        from services.email_service import send_auth_email
+
+        token = create_auth_flow_token(user.id, "email_verify", settings)
+        link = f"{settings.app_base_url.rstrip('/')}/verify-email?token={token}"
+        send_auth_email(user.email, "Verify your email address", link, settings)
+
     return await build_auth_response(session, user.id, tokens)
 
 
@@ -214,3 +222,98 @@ async def build_auth_response(
     )
     user = result.scalar_one()
     return AuthResponse(user=user, tokens=tokens)
+
+
+# ---------------------------------------------------------------------------
+# Auth flow tokens (password reset / email verification)
+# ---------------------------------------------------------------------------
+def create_auth_flow_token(user_id, kind: str, settings) -> str:
+    """Sign a short-lived JWT with a purpose claim."""
+    import jwt as pyjwt
+
+    now = datetime.now(UTC)
+    if kind == "reset_password":
+        ttl = timedelta(minutes=settings.password_reset_token_expire_minutes)
+    else:
+        ttl = timedelta(hours=settings.email_verification_token_expire_hours)
+    payload = {
+        "sub": str(user_id),
+        "purpose": kind,
+        "iat": now,
+        "exp": now + ttl,
+    }
+    return pyjwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_auth_flow_token(token: str, kind: str, settings):
+    """Return the user id for a valid purpose-matching token, else None."""
+    import jwt as pyjwt
+
+    try:
+        payload = pyjwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except Exception:
+        return None
+    if payload.get("purpose") != kind:
+        return None
+    try:
+        from uuid import UUID as _UUID
+
+        return _UUID(str(payload["sub"]))
+    except (KeyError, ValueError):
+        return None
+
+
+async def start_password_reset(session: AsyncSession, email: str, settings) -> dict:
+    """Issue a password-reset token + link. Never reveals whether the email exists."""
+    from services.email_service import send_auth_email
+
+    result = await session.execute(
+        select(User).where(User.email == email.lower(), User.deleted_at.is_(None))
+    )
+    user = result.scalar_one_or_none()
+    message = "If that email exists, password reset instructions have been sent."
+    dev_link = None
+    if user is not None:
+        token = create_auth_flow_token(user.id, "reset_password", settings)
+        link = f"{settings.app_base_url.rstrip('/')}/reset-password?token={token}"
+        if settings.app_env != "production":
+            dev_link = link
+        send_auth_email(user.email, "Reset your AI Ebook Studio password", link, settings)
+    return {"message": message, "dev_link": dev_link}
+
+
+async def complete_password_reset(session: AsyncSession, token: str, new_password: str, settings) -> str:
+    """Validate the reset token, set the new password, revoke all sessions."""
+    from core.exceptions import ValidationAppError
+    from sqlalchemy import update as sa_update
+
+    user_id = decode_auth_flow_token(token, "reset_password", settings)
+    if user_id is None:
+        raise ValidationAppError("This reset link is invalid or has expired. Request a new one.")
+    user = await session.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise ValidationAppError("This reset link is invalid or has expired. Request a new one.")
+    user.password_hash = hash_password(new_password)
+    await session.execute(
+        sa_update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(UTC))
+    )
+    await session.commit()
+    return "Password updated. All existing sessions have been signed out."
+
+
+async def verify_email_flow(session: AsyncSession, token: str, settings) -> str:
+    """Mark the user email as verified with a signed token."""
+    from core.exceptions import ValidationAppError
+
+    user_id = decode_auth_flow_token(token, "email_verify", settings)
+    if user_id is None:
+        raise ValidationAppError("This verification link is invalid or has expired.")
+    user = await session.get(User, user_id)
+    if user is None or user.deleted_at is not None:
+        raise ValidationAppError("This verification link is invalid or has expired.")
+    user.is_email_verified = True
+    user.email_verified_at = datetime.now(UTC)
+    await session.commit()
+    return "Email verified. You are all set."

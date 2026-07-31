@@ -224,3 +224,23 @@ async def list_books(session: AsyncSession, user: User, project_id: UUID) -> lis
         .order_by(Book.created_at),
     )
     return list(result.scalars())
+
+
+async def restore_project(session: AsyncSession, user: User, project_id: UUID) -> Project:
+    """Restore an archived or soft-deleted project back to active."""
+    from datetime import UTC, datetime
+
+    from core.exceptions import ResourceNotFoundError
+
+    result = await session.execute(
+        select(Project).where(Project.id == project_id, Project.owner_user_id == user.id)
+    )
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise ResourceNotFoundError("Project not found.")
+    project.status = "active"
+    project.deleted_at = None
+    project.updated_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(project)
+    return project

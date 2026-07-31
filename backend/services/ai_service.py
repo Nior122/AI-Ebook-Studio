@@ -323,6 +323,8 @@ class AIService:
             order.append(self.settings.ai_fallback_provider)
         order += [p for p in self._registry.available() if p != primary_provider]
 
+        last_fallback_error: AIProviderError | None = None
+        first_non_retryable: AIProviderError | None = None
         for pid in order:
             provider_obj = self._registry.get(pid)
             if provider_obj is None:
@@ -339,7 +341,17 @@ class AIService:
                 return self._annotate(response, task)
             except AIProviderError as exc:
                 logger.warning("fallback_failed", provider=pid, error=str(exc))
+                if first_non_retryable is None and not exc.retryable:
+                    first_non_retryable = exc
+                last_fallback_error = exc
                 continue
+        if first_non_retryable is not None:
+            # A provider said "this cannot work, do not retry" (e.g. an AI key
+            # is required): surface that actionable message instead of the
+            # primary provider's configuration error.
+            raise first_non_retryable
+        if last_fallback_error is not None:
+            raise last_fallback_error
         return None
 
     @staticmethod

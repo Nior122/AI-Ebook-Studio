@@ -95,6 +95,19 @@ JOB_LABELS = {
     JobType.COVER_GENERATION: "Cover generation",
 }
 
+# Job types that should leave an automatic project restore point behind.
+AUTO_VERSION_JOB_TYPES = {
+    JobType.PROOFREADING,
+    JobType.TRANSLATION,
+    JobType.COVER_GENERATION,
+    JobType.MARKETING_GENERATION,
+    JobType.IMAGE_GENERATION,
+    JobType.IMAGE_ANALYSIS,
+    JobType.DOCX_BUILD,
+    JobType.PDF_EXPORT,
+    JobType.EPUB_EXPORT,
+}
+
 
 async def _job_project_id(payload: dict[str, object]) -> UUID | None:
     """Resolve the project a job belongs to (payload first, then Book lookup)."""
@@ -110,6 +123,16 @@ async def _job_project_id(payload: dict[str, object]) -> UUID | None:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Book).where(Book.id == UUID(str(raw_book))))
+            book = result.scalar_one_or_none()
+            if book is not None:
+                return book.project_id
+            # Writing-book jobs carry the WritingBook id; the primary Book
+            # records it in metadata_json.writing_book_id.
+            result = await session.execute(
+                select(Book).where(
+                    Book.metadata_json["writing_book_id"].as_string() == str(raw_book)
+                )
+            )
             book = result.scalar_one_or_none()
             return book.project_id if book is not None else None
     except Exception:
@@ -173,6 +196,23 @@ async def _notify_terminal(handle: JobHandle) -> None:
                     session, user_id, project_id, "job_completed", f"{label} complete",
                     {"job_id": str(handle.id), "job_type": handle.job_type.value},
                 )
+            if (
+                project_id is not None
+                and handle.status == JobStatus.COMPLETED
+                and handle.job_type in AUTO_VERSION_JOB_TYPES
+            ):
+                from models.accounts import User
+                from services.studio_service import create_version
+
+                user = await session.get(User, user_id)
+                if user is not None:
+                    await create_version(
+                        session, user, project_id,
+                        label=f"After {label}",
+                        reason=f"Automatic restore point created after {label}.",
+                        created_by="auto",
+                        announce=True,
+                    )
     except Exception:
         logger.exception("Failed to record terminal notification for job %s", handle.id)
 

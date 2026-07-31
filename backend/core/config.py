@@ -79,6 +79,20 @@ class Settings(BaseSettings):
     clerk_secret_key: str | None = None
     clerk_jwks_url: str | None = None
 
+    # --- Email / auth flows ---
+    app_base_url: str = "http://localhost:3000"
+    email_from: str = "AI Ebook Studio <no-reply@ai-ebook.studio>"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    require_email_verification: bool = False
+    # Optional self-hosted LibreTranslate endpoint for key-free translation.
+    libretranslate_url: str | None = None
+
+    # --- Security / rate limiting ---
+    rate_limit_enabled: bool = True
+
     # --- Token lifetimes ---
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30

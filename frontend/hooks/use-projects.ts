@@ -60,6 +60,26 @@ export function useDeleteProject() {
   });
 }
 
+export function useRestoreProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => projectsApi.restore(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export function useDuplicateProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => projectsApi.duplicate(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
 export function useArchiveProject() {
   const qc = useQueryClient();
   return useMutation({

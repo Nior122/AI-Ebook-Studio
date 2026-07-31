@@ -30,6 +30,7 @@ from services.project_service import (
     soft_delete_project,
     update_project,
     update_project_settings,
+    restore_project as restore_project_svc,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -127,6 +128,21 @@ async def post_duplicate_project(
     """Duplicate a project shell and its settings."""
     project = await duplicate_project(session, user, project_id)
     return ProjectResponse.model_validate(project)
+
+
+@router.post(
+    "/{project_id}/restore",
+    response_model=ProjectResponse,
+    summary="Restore an archived or deleted project",
+)
+async def restore_project(
+    project_id: UUID,
+    session: DatabaseSession,
+    user: CurrentUser,
+) -> ProjectResponse:
+    """Restore a project to active (unarchive / undelete)."""
+    project = await restore_project_svc(session, user, project_id)
+    return project
 
 
 @router.post("/{project_id}/favorite", response_model=ProjectResponse, summary="Favorite project")

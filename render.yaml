@@ -1,0 +1,94 @@
+# Render blueprint — AI Ebook Studio backend (FastAPI)
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. In Render: New -> Blueprint -> pick the repo -> this render.yaml.
+#   3. In the dashboard, set DATABASE_URL to your Neon DSN (and any API keys).
+#   4. Note: background jobs + WebSockets run in-process, so keep this service
+#      as a single instance (no scaling) — the plan's default is fine.
+#
+# Health check uses /docs (the API has no /health route; /docs returns 200).
+services:
+  - type: web
+    name: ai-ebook-studio-api
+    runtime: python
+    rootDir: backend
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /docs
+    autoDeploy: true
+    envVars:
+      # --- App ---
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      # --- Security (Render generates strong values once) ---
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      # --- Database (Neon) ---
+      # Set DATABASE_URL in the Render dashboard: use the NON-POOLING Neon DSN
+      #   postgresql+asyncpg://USER:PASSWORD@ep-xxx-xxxx.region.aws.neon.tech/ebook_studio?sslmode=require
+      # (asyncpg cannot use Neon's PgBouncer pooled endpoint reliably.)
+      - key: DATABASE_URL
+        sync: false
+      # --- Auth (Clerk) ---
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+      # --- CORS: allow the Cloudflare-hosted frontend ---
+      - key: CORS_ORIGINS
+        value: https://ai-ebook-studio.pages.dev,http://localhost:3000
+      # --- Emails (password reset / verification) ---
+      - key: APP_BASE_URL
+        value: https://ai-ebook-studio.pages.dev
+      - key: EMAIL_FROM
+        value: "AI Ebook Studio <no-reply@ai-ebook.studio>"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: REQUIRE_EMAIL_VERIFICATION
+        value: "false"
+      # --- AI providers (optional; the local engine works without keys) ---
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: AI_DEFAULT_PROVIDER
+        value: openai
+      - key: AI_DEFAULT_MODEL
+        value: openai/gpt-4o-mini
+      - key: AI_FALLBACK_ENABLED
+        value: "true"
+      - key: AI_FALLBACK_PROVIDER
+        value: local
+      # --- Translation without a key: self-hosted LibreTranslate URL ---
+      - key: LIBRETRANSLATE_URL
+        sync: false
+      # --- Storage: local disk on Render (fine for a single instance) ---
+      - key: STORAGE_PROVIDER
+        value: local
+      - key: STORAGE_BUCKET
+        value: ai-ebook-studio
+      # --- Rate limiting ---
+      - key: RATE_LIMIT_ENABLED
+        value: "true"

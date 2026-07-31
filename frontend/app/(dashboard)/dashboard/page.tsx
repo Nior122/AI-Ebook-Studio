@@ -6,7 +6,15 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useProjects } from "@/hooks/use-projects";
+import {
+  useProjects,
+  useArchiveProject,
+  useDeleteProject,
+  useDuplicateProject,
+  useRestoreProject,
+} from "@/hooks/use-projects";
+import { useToast } from "@/components/ui/toast";
+import { toastError } from "@/lib/errors";
 import { STAGE_LABELS, type ProjectStage } from "@/lib/api/studio";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +45,11 @@ export default function DashboardPage() {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const { data: projects, isLoading, isError, refetch } = useProjects();
+  const toast = useToast();
+  const archiveProject = useArchiveProject();
+  const restoreProject = useRestoreProject();
+  const duplicateProject = useDuplicateProject();
+  const deleteProject = useDeleteProject();
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -153,6 +166,59 @@ export default function DashboardPage() {
                         Generate
                       </Button>
                     ) : null}
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-1">
+                      {project.status === "archived" ? (
+                        <button
+                          className="rounded px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          onClick={() =>
+                            restoreProject.mutate(project.id, {
+                              onSuccess: () => toast({ title: "Project restored", variant: "success" }),
+                              onError: (error) => toast(toastError(error)),
+                            })
+                          }
+                        >
+                          Restore
+                        </button>
+                      ) : (
+                        <button
+                          className="rounded px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          onClick={() =>
+                            archiveProject.mutate(project.id, {
+                              onSuccess: () => toast({ title: "Project archived", variant: "success" }),
+                              onError: (error) => toast(toastError(error)),
+                            })
+                          }
+                        >
+                          Archive
+                        </button>
+                      )}
+                      <button
+                        className="rounded px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        onClick={() =>
+                          duplicateProject.mutate(project.id, {
+                            onSuccess: () => toast({ title: "Project duplicated", variant: "success" }),
+                            onError: (error) => toast(toastError(error)),
+                          })
+                        }
+                      >
+                        Duplicate
+                      </button>
+                    </div>
+                    <button
+                      className="rounded px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-red-50 hover:text-red-600"
+                      onClick={() => {
+                        if (window.confirm(`Delete "${project.name}"? It can be restored from the archive.`)) {
+                          deleteProject.mutate(project.id, {
+                            onSuccess: () => toast({ title: "Project deleted", variant: "success" }),
+                            onError: (error) => toast(toastError(error)),
+                          });
+                        }
+                      }}
+                    >
+                      Delete
+                    </button>
                   </div>
                 </CardContent>
               </Card>

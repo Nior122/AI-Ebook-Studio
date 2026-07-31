@@ -8,12 +8,15 @@ current queue backend.
 
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from core.exceptions import ResourceNotFoundError
+from api.dependencies import CurrentUser, DatabaseSession
+from models.operations import Job
+from sqlalchemy import select
 from schemas.jobs import JobCreateRequest, JobResponse
 from services.jobs import enqueue_and_schedule
-from services.jobs.enums import JobStatus
+from services.jobs.enums import JobStatus, JobType
 from services.jobs.queue import JobQueueProtocol, get_job_queue
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -24,10 +27,46 @@ def _queue() -> JobQueueProtocol:
     return get_job_queue()
 
 
-@router.get("", summary="List jobs (not implemented)")
-async def list_jobs() -> dict[str, str]:
-    """Placeholder: a future endpoint will list persisted jobs for the caller."""
-    return {"message": "Endpoint not implemented yet"}
+@router.get("", response_model=list[JobResponse], summary="List my jobs")
+async def list_jobs(
+    session: DatabaseSession,
+    user: CurrentUser,
+    job_type: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[JobResponse]:
+    """List the caller jobs from the persisted job table (newest first)."""
+    query = (
+        select(Job)
+        .where(Job.user_id == user.id)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
+    if job_type:
+        query = query.where(Job.job_type == job_type)
+    if status:
+        query = query.where(Job.status == status)
+    result = await session.execute(query)
+    rows = list(result.scalars())
+    response: list[JobResponse] = []
+    for job in rows:
+        try:
+            response.append(
+                JobResponse(
+                    id=job.id,
+                    job_type=JobType(job.job_type),
+                    status=JobStatus(job.status),
+                    progress=job.progress or 0,
+                    current_step=job.current_step,
+                    result=job.result_data or job.result,
+                    error_message=job.error_message,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                )
+            )
+        except ValueError:
+            continue
+    return response
 
 
 @router.get("/{job_id}", response_model=JobResponse, summary="Get job status")
