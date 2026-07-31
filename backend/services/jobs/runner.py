@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.session import AsyncSessionLocal
 from models.operations import Job
+from models.project import Book
 from services.jobs.enums import JobStatus, JobType
 from services.jobs.queue import JobHandle, get_job_queue
 
@@ -80,6 +81,112 @@ async def _persist_job(handle: JobHandle, db: AsyncSession) -> Job:
     return job
 
 
+JOB_LABELS = {
+    JobType.BOOK_GENERATION: "Book generation",
+    JobType.PROOFREADING: "Proofreading",
+    JobType.IMAGE_ANALYSIS: "Image analysis",
+    JobType.IMAGE_GENERATION: "Image generation",
+    JobType.DOCX_BUILD: "DOCX export",
+    JobType.PDF_EXPORT: "PDF export",
+    JobType.EPUB_EXPORT: "EPUB export",
+    JobType.TRANSLATION: "Translation",
+    JobType.MARKETING_GENERATION: "Marketing copy",
+    JobType.KDP_VALIDATION: "KDP validation",
+    JobType.COVER_GENERATION: "Cover generation",
+}
+
+
+async def _job_project_id(payload: dict[str, object]) -> UUID | None:
+    """Resolve the project a job belongs to (payload first, then Book lookup)."""
+    raw = payload.get("project_id")
+    if raw:
+        try:
+            return UUID(str(raw))
+        except ValueError:
+            return None
+    raw_book = payload.get("book_id")
+    if not raw_book:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Book).where(Book.id == UUID(str(raw_book))))
+            book = result.scalar_one_or_none()
+            return book.project_id if book is not None else None
+    except Exception:
+        return None
+
+
+def _friendly_job_error(job_type: JobType, raw: str | None) -> str:
+    """Turn a raw exception message into an actionable, human-readable note."""
+    message = (raw or "").strip()
+    if not message:
+        return "The operation did not complete. Check your configuration and retry."
+    if "ProviderConfigurationError" in message or "api key" in message.lower() or "not configured" in message.lower() or "is not registered" in message:
+        return (
+            "This operation needs an AI provider key. Add one in Settings → AI "
+            "(or set it in the Book Setup wizard), then retry. The local engine "
+            "covers generation, proofreading, marketing, and covers without a key."
+        )
+    if "LibreTranslate" in message:
+        return message
+    return message[:400]
+
+
+async def _notify_terminal(handle: JobHandle) -> None:
+    """Record a notification + activity when a job finishes (success or failure)."""
+    from services.events import publish_project_event, publish_user_event
+    from services.studio_service import create_notification, record_activity
+
+    payload = handle.payload
+    raw_user = payload.get("user_id")
+    if not raw_user:
+        return
+    try:
+        user_id = UUID(str(raw_user))
+    except ValueError:
+        return
+    project_id = await _job_project_id(payload)
+    label = JOB_LABELS.get(handle.job_type, handle.job_type.value.replace("_", " ").title())
+
+    if handle.status == JobStatus.COMPLETED:
+        title = f"{label} complete"
+        body = "The operation finished successfully."
+        level = "success"
+    elif handle.status == JobStatus.FAILED:
+        title = f"{label} failed"
+        body = _friendly_job_error(handle.job_type, handle.error_message)
+        level = "error"
+    else:
+        return
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await create_notification(
+                session, user_id, project_id,
+                kind="job_completed" if handle.status == JobStatus.COMPLETED else "job_failed",
+                title=title, body=body, level=level,
+                action_type="open_project" if project_id is not None else None,
+                action_payload={"project_id": str(project_id)} if project_id is not None else None,
+            )
+            if project_id is not None and handle.status == JobStatus.COMPLETED:
+                await record_activity(
+                    session, user_id, project_id, "job_completed", f"{label} complete",
+                    {"job_id": str(handle.id), "job_type": handle.job_type.value},
+                )
+    except Exception:
+        logger.exception("Failed to record terminal notification for job %s", handle.id)
+
+    publish_user_event(str(user_id), "job.terminal", {
+        "job_id": str(handle.id), "job_type": handle.job_type.value,
+        "status": handle.status.value, "title": title, "level": level,
+    })
+    if project_id is not None:
+        publish_project_event(str(project_id), "job.terminal", {
+            "job_id": str(handle.id), "job_type": handle.job_type.value,
+            "status": handle.status.value, "title": title, "level": level,
+        })
+
+
 async def run_job(handle: JobHandle) -> None:
     """Execute a job in the background, updating Handle progress through callbacks.
 
@@ -96,8 +203,23 @@ async def run_job(handle: JobHandle) -> None:
         )
         return
 
+    from services.events import publish_project_event, publish_user_event
+
     async def update_progress(progress: int, current_step: str | None = None) -> None:
         await queue.update_progress(handle.id, progress, current_step)
+        project_id = await _job_project_id(handle.payload)
+        event = {
+            "job_id": str(handle.id),
+            "job_type": handle.job_type.value,
+            "status": "RUNNING",
+            "progress": progress,
+            "current_step": current_step,
+        }
+        raw_user = handle.payload.get("user_id")
+        if raw_user:
+            publish_user_event(str(raw_user), "job.progress", event)
+        if project_id is not None:
+            publish_project_event(str(project_id), "job.progress", event)
 
     db_stored = False
     try:
@@ -112,6 +234,7 @@ async def run_job(handle: JobHandle) -> None:
             await queue.handle_completed(handle.id, result)
             handle.result = result
             await _persist_job(handle, session)
+        await _notify_terminal(handle)
     except Exception as exc:
         logger.exception("Job %s (%s) failed: %s", handle.id, handle.job_type, exc)
         await queue.update_status(handle.id, JobStatus.FAILED, error_message=str(exc))
@@ -122,6 +245,8 @@ async def run_job(handle: JobHandle) -> None:
                 await _persist_job(handle, session)
         except Exception:
             logger.exception("Failed to persist job failure for %s", handle.id)
+        finally:
+            await _notify_terminal(handle)
 
 
 def _enqueue(

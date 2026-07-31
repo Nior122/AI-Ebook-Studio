@@ -2,7 +2,45 @@
 
 AI Ebook Studio is a production SaaS foundation for planning, writing, editing, illustrating, validating, and exporting ebooks with AI assistance.
 
-This repository is currently in **Stage 1: Project Foundation**. It intentionally does not implement ebook writing, editing, image generation, authentication, export, KDP validation, marketing, or translation features yet. The goal of this stage is a clean architecture that future features can follow safely.
+The core user flow is now fully implemented and wired end-to-end:
+
+```
+Dashboard → New Book wizard (5 sections) → Generate Book
+  → background generation (floating progress panel: %, ETA, current task)
+  → unified workspace opens automatically (editor + AI tools)
+  → autosave, versions, search, notifications → validate → export
+```
+
+## What works today
+
+- **New Book wizard** — title/subtitle/author/topic/audience/language/tone/style/
+  purpose, word-count presets with live chapter estimates (+ override), full
+  formatting section (page size, margins, fonts, spacing, images), AI settings
+  (provider, encrypted API key, creativity, quality, reading level, citations,
+  exercises, summaries), special instructions, and smart-AI pre-checks that ask
+  follow-up questions when something is ambiguous.
+- **One-click generation** — one button launches the whole pipeline (brief →
+  blueprint → chapters → formatting → validation) in the background with live
+  progress, ETA, and per-chapter status; the editor opens automatically when it
+  finishes.
+- **Unified workspace** (`/workspace/[projectId]`) — three panels:
+  - Left: chapters, outline, bookmarks, version history (restore points), activity timeline
+  - Center: rich text editor with autosave ("Saving… / Saved / Last saved"), AI quick actions
+  - Right: AI assistant, proofreader, images, cover, marketing, translation, KDP validator, export
+- **Live updates** — WebSocket stream for progress, notifications, activities,
+  and version events; floating minimizable progress panel; notification center
+  with retry/open actions.
+- **Project stages** — Draft → Generating → Review → Ready for Export → Published.
+- **Version history** — automatic restore points after generation/proofreading/
+  formatting/translation plus manual snapshots, with one-click restore.
+- **Manuscript search** (Ctrl+F) — chapters, headings, and image captions.
+- **Keyboard shortcuts** — Ctrl+S (save), Ctrl+F (search), Ctrl+Z / Ctrl+Shift+Z.
+- **Export & validation** — real DOCX/PDF/EPUB generation and KDP validation as
+  background jobs with notifications.
+- **Zero-key operation** — a built-in local engine (see
+  [docs/Studio_UX.md](docs/Studio_UX.md)) keeps every feature working without API
+  keys; real OpenAI / Anthropic / Gemini / OpenRouter / Groq providers take over
+  automatically when keys are configured.
 
 ## Technology Stack
 
@@ -19,23 +57,24 @@ Backend:
 - Alembic
 
 Infrastructure:
-- Neon PostgreSQL
+- Neon PostgreSQL (SQLite works for local dev)
 - GitHub repository
 - Future frontend deployment to Cloudflare Pages
 - Future backend deployment to Render
 
 Provider strategy:
 - AI providers are abstracted behind a provider interface.
-- Supported planned providers: OpenAI, Anthropic, Google Gemini, OpenRouter, and future providers.
-- Image providers are separate from text AI providers.
-- Pollinations is the first planned image provider.
+- Supported providers: OpenAI, Anthropic, Google Gemini, OpenRouter, Groq,
+  NVIDIA NIM, Ollama, and a built-in offline Local engine.
+- Image providers are separate from text AI providers; Pollinations is the
+  default image provider (free, no key).
 
 ## Project Structure
 
 ```text
 AI-Ebook-Studio/
-  frontend/       Next.js application foundation
-  backend/        FastAPI application foundation
+  frontend/       Next.js application
+  backend/        FastAPI application
   shared/         Cross-stack contracts and shared types
   docs/           Product, architecture, API, database, UI, security, and workflow docs
   prompts/        Prompt templates grouped by domain
@@ -61,58 +100,39 @@ cd frontend
 npm install
 ```
 
-Install backend dependencies:
+Install backend dependencies and run it (SQLite works out of the box for local
+development — no Docker or Postgres required):
 
 ```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+set DATABASE_URL=sqlite+aiosqlite:///./var/dev.db   # or export DATABASE_URL=...
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
 ```
 
-## Running Locally
-
-Frontend:
+Run the frontend:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Backend setup will be activated in Stage 2 when the FastAPI app shell and first API boundaries are introduced.
+Open http://localhost:3000, sign in, and click **New Book**.
 
-Optional local infrastructure:
+## Tests
 
 ```bash
-docker compose up postgres redis -d
+cd backend
+python -m pytest tests/ -q
 ```
 
-## Stage 1 Scope
+The suite includes an end-to-end test (`tests/test_studio_flow.py`) covering the
+complete user journey: wizard setup → background generation → autosave →
+versions/restore → activities → notifications → search → bookmarks → stages →
+DOCX export → KDP validation → assistant → images.
 
-Included:
-- Professional monorepo layout
-- Frontend folder architecture
-- Backend folder architecture
-- Documentation starter set
-- Prompt template starter set
-- Environment variable template
-- Provider abstraction design
-- UI design system documentation
-- Deployment direction for Cloudflare Pages, Render, and Neon
-
-Not included yet:
-- Authentication
-- Ebook writing
-- Editing
-- Image generation
-- DOCX, PDF, EPUB, or KDP export
-- Marketing tools
-- Translation
-- Billing
-- Production deployments
-
-## Roadmap
-
-Stage 2 should add the first runnable backend app shell, API versioning conventions, database connection plumbing, Alembic baseline, frontend route groups, and authentication design decisions without implementing the full auth flow.
-
-See [Development_Roadmap.md](docs/Development_Roadmap.md) for the staged delivery plan.
+See [docs/Studio_UX.md](docs/Studio_UX.md) for the full architecture of the
+unified workspace.

@@ -48,6 +48,7 @@ from models.assets import (
 from models.document import Chapter, Paragraph, Part, Section, Sentence
 from models.operations import ActivityLog, AuditLog, Job, Notification
 from models.project import Book, BookVersion, Folder, Project, ProjectSettings
+from models.studio import Bookmark, ProjectActivity, ProjectVersion, StudioNotification
 from models.workspace import Workspace, WorkspaceMember
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "BookBrief",
     "BookSettings",
     "BookVersion",
+    "Bookmark",
     "Chapter",
     "ChapterVersion",
     "EditingSession",
@@ -84,7 +86,9 @@ __all__ = [
     "Permission",
     "Profile",
     "Project",
+    "ProjectActivity",
     "ProjectSettings",
+    "ProjectVersion",
     "RefreshToken",
     "ReviewJob",
     "Role",
@@ -93,6 +97,7 @@ __all__ = [
     "Sentence",
     "Session",
     "SuggestionBatch",
+    "StudioNotification",
     "TranslationRecord",
     "User",
     "UserRole",

@@ -81,7 +81,7 @@ async def test_image_api_flow(
     project_id = UUID(project.json()["id"])
 
     book = await client.post(
-        f"/api/v1/projects/{project_id}/books",
+        f"/api/v1/projects/{project_id}/book",
         json={"title": "Illustrated Book"},
         headers=headers,
     )

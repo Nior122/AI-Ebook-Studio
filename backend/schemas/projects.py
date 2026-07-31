@@ -100,6 +100,7 @@ class ProjectResponse(BaseModel):
     title: str
     description: str | None
     status: str
+    stage: str = "draft"
     is_favorite: bool
     created_at: datetime
     updated_at: datetime

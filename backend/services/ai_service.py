@@ -66,11 +66,12 @@ class AIService:
     async def generate_text(
         self,
         *,
-        messages: list[Any],
+        messages: list[Any] | None = None,
         model: str | None = None,
         provider: str | None = None,
         task: str | None = None,
         system_prompt: str | None = None,
+        user_prompt: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
         top_p: float | None = None,
@@ -95,6 +96,8 @@ class AIService:
 
         from providers.ai.base import GenerationConfig, GenerationRequest, Message
 
+        if messages is None:
+            messages = [Message(role="user", content=user_prompt or "")]
         request = GenerationRequest(
             messages=[m if isinstance(m, Message) else Message(**m) for m in messages],
             model=resolved_model,
@@ -175,6 +178,10 @@ class AIService:
                 last_exc = exc
                 if not exc.retryable:
                     break
+        if self.settings.ai_fallback_enabled:
+            fallback = await self._fallback(request, resolved_provider, task)
+            if isinstance(fallback, dict):
+                return fallback
         if last_exc:
             raise last_exc
         raise ProviderConfigurationError("Structured generation failed.", provider=resolved_provider)
@@ -324,6 +331,10 @@ class AIService:
             adjusted = self._repoint(request, pid)
             try:
                 logger.info("fallback_attempt", provider=pid, model=adjusted.model)
+                if request.config.json_mode and request.config.response_schema:
+                    return await provider_obj.generate_structured_output(
+                        adjusted, request.config.response_schema
+                    )
                 response = await provider_obj.generate_text(adjusted)
                 return self._annotate(response, task)
             except AIProviderError as exc:

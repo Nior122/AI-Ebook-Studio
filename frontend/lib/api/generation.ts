@@ -11,10 +11,13 @@ export interface BookSetup {
     tone: string;
     writing_style: string;
     language: string;
+    author?: string | null;
+    book_purpose?: string | null;
   };
   size: {
     total_word_count: number;
     custom: boolean;
+    chapters_override?: number | null;
   };
   layout?: {
     page_size?: string;
@@ -29,6 +32,7 @@ export interface BookSetup {
     image_width?: number;
     image_ratio?: string;
     default_image_style?: string;
+    chapter_heading_style?: string;
   };
   ai?: {
     creativity?: string;
@@ -36,6 +40,11 @@ export interface BookSetup {
     provider?: string;
     model?: string;
     temperature?: number | null;
+    reading_level?: string | null;
+    writing_quality?: string | null;
+    use_citations?: boolean;
+    generate_exercises?: boolean;
+    generate_summaries?: boolean;
   };
   special_instructions?: {
     instructions?: string;
@@ -57,3 +66,13 @@ export const generationApi = {
 };
 
 export const WORD_COUNT_PRESETS = [5000, 10000, 15000, 25000, 50000] as const;
+
+/** Rough chapter estimate for a word count (mirrors the backend). */
+export function estimateChapters(words: number): number {
+  if (words <= 5000) return 5;
+  if (words <= 10000) return 8;
+  if (words <= 15000) return 10;
+  if (words <= 25000) return 14;
+  if (words <= 50000) return 20;
+  return 25;
+}

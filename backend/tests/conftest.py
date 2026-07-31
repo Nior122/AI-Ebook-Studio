@@ -3,6 +3,14 @@
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import os
+
+# Job-runner sessions use the GLOBAL engine (AsyncSessionLocal), so point it at
+# a SQLite file BEFORE any app import. In-memory engines can't be shared across
+# sessions, and background jobs would otherwise hit the configured Postgres.
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./var/test_studio.db")
+os.makedirs(os.path.join(os.path.dirname(__file__), "..", "var"), exist_ok=True)
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

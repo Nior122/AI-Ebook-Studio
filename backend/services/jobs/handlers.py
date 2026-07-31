@@ -32,7 +32,7 @@ def _payload_user(payload: dict[str, object]) -> tuple[UUID | None, UUID | None]
     )
 
 
-def _load_user(session: AsyncSession, user_id: UUID):
+async def _load_user(session: AsyncSession, user_id: UUID):
     """Load the user for the job from the DB.
 
     Returns a User instance (the dynamically resolved model class) without
@@ -42,7 +42,7 @@ def _load_user(session: AsyncSession, user_id: UUID):
 
     from models.accounts import User as UserModel
 
-    result = session.execute(sa_select(UserModel).where(UserModel.id == user_id))
+    result = await session.execute(sa_select(UserModel).where(UserModel.id == user_id))
     user = result.scalar()
     if user is None:
         raise ValueError(f"User {user_id} not found.")
@@ -60,7 +60,7 @@ async def _export_handler(
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
         raise ValueError("Export job missing user_id or book_id.")
-    user = _load_user(session, user_id)
+    user = await _load_user(session, user_id)
 
     await progress(10, "Loading chapters")
     fmt = str(payload.get("format", "docx"))
@@ -103,7 +103,7 @@ async def _kdp_validation_handler(
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
         raise ValueError("KDP validation job missing user_id or book_id.")
-    user = _load_user(session, user_id)
+    user = await _load_user(session, user_id)
 
     await progress(40, "Running margin and font checks")
     await progress(70, "Running image and layout checks")
@@ -129,7 +129,7 @@ async def _cover_handler(
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
         raise ValueError("Cover job missing user_id or book_id.")
-    user = _load_user(session, user_id)
+    user = await _load_user(session, user_id)
 
     component = str(payload.get("component", "all"))
     from services.ai_service import AIService
@@ -176,7 +176,7 @@ async def _marketing_handler(
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
         raise ValueError("Marketing job missing user_id or book_id.")
-    user = _load_user(session, user_id)
+    user = await _load_user(session, user_id)
 
     asset_type_str = str(payload.get("asset_type", "amazon_description"))
     try:
@@ -216,7 +216,7 @@ async def _translation_handler(
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
         raise ValueError("Translation job missing user_id or book_id.")
-    user = _load_user(session, user_id)
+    user = await _load_user(session, user_id)
 
     source_lang = str(payload.get("source_lang", "en"))
     target_lang = str(payload.get("target_lang", "es"))

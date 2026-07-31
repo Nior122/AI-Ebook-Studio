@@ -1,70 +1,72 @@
-// Projects page tests: renders a project list, opens the create dialog,
-// validates input, and confirms deletion via a dialog.
+// Dashboard tests: renders the book list with stage badges, filters by search,
+// and navigates to the unified workspace when a book is opened.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
-import ProjectsPage from "@/app/(dashboard)/projects/page";
+import { screen, fireEvent } from "@testing-library/react";
+import DashboardPage from "@/app/(dashboard)/dashboard/page";
 import * as projectsHooks from "@/hooks/use-projects";
-import { renderWithProviders } from "./test-utils";
+import { renderWithProviders, routerSpies } from "./test-utils";
 
-const sampleProjects = [
+const projects = [
   {
     id: "p1",
     workspace_id: "w1",
     owner_user_id: "u1",
-    name: "My Book",
-    title: "My Book Title",
-    description: "A test book",
+    name: "The Startup Field Guide",
+    title: "The Startup Field Guide",
+    description: "Launching and growing a small software business",
     status: "active",
+    stage: "review",
     is_favorite: false,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    created_at: "2026-07-01T00:00:00Z",
+    updated_at: "2026-07-10T00:00:00Z",
+  },
+  {
+    id: "p2",
+    workspace_id: "w1",
+    owner_user_id: "u1",
+    name: "Cooking Fundamentals",
+    title: "Cooking Fundamentals",
+    description: null,
+    status: "active",
+    stage: "draft",
+    is_favorite: false,
+    created_at: "2026-07-02T00:00:00Z",
+    updated_at: "2026-07-05T00:00:00Z",
   },
 ];
 
-describe("ProjectsPage", () => {
+describe("DashboardPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Stub the projects hooks with controllable implementations.
     vi.spyOn(projectsHooks, "useProjects").mockReturnValue({
-      data: sampleProjects,
+      data: projects,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
     } as never);
-    const mutate = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(projectsHooks, "useDeleteProject").mockReturnValue({ mutateAsync: mutate, isPending: false } as never);
-    vi.spyOn(projectsHooks, "useArchiveProject").mockReturnValue({ mutateAsync: mutate, isPending: false } as never);
-    vi.spyOn(projectsHooks, "useUpdateProject").mockReturnValue({ mutateAsync: mutate, isPending: false } as never);
-    vi.spyOn(projectsHooks, "useCreateProject").mockReturnValue({ mutateAsync: mutate, isPending: false } as never);
   });
 
-  it("renders the project list", () => {
-    renderWithProviders(<ProjectsPage />);
-    expect(screen.getByText("My Book")).toBeInTheDocument();
+  it("renders books with their lifecycle stage badges", async () => {
+    renderWithProviders(<DashboardPage />);
+    expect(screen.getByText("The Startup Field Guide")).toBeDefined();
+    expect(screen.getByText("Cooking Fundamentals")).toBeDefined();
+    expect(screen.getByText("Review")).toBeDefined();
+    expect(screen.getByText("Draft")).toBeDefined();
   });
 
-  it("opens the create dialog from the New Book button", async () => {
-    renderWithProviders(<ProjectsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /new book/i }));
-    expect(await screen.findByText(/create a new book project/i)).toBeInTheDocument();
+  it("opens the unified workspace when a book is clicked", async () => {
+    renderWithProviders(<DashboardPage />);
+    fireEvent.click(screen.getByText("The Startup Field Guide"));
+    expect(routerSpies.push).toHaveBeenCalledWith("/workspace/p1");
   });
 
-  it("shows a confirmation dialog before deleting", async () => {
-    renderWithProviders(<ProjectsPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent(/delete project/i);
-    expect(dialog).toHaveTextContent(/permanently deleted/i);
-  });
-
-  it("filters by search query", async () => {
-    renderWithProviders(<ProjectsPage />);
-    fireEvent.change(screen.getByLabelText(/search projects/i), {
-      target: { value: "nonexistent" },
+  it("filters books by search text", async () => {
+    renderWithProviders(<DashboardPage />);
+    fireEvent.change(screen.getByPlaceholderText("Search your books…"), {
+      target: { value: "cooking" },
     });
-    await waitFor(() =>
-      expect(screen.getByText(/no matching projects/i)).toBeInTheDocument(),
-    );
+    expect(screen.queryByText("The Startup Field Guide")).toBeNull();
+    expect(screen.getByText("Cooking Fundamentals")).toBeDefined();
   });
 });

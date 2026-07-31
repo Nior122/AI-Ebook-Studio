@@ -1,157 +1,165 @@
 "use client";
 
-// Dashboard. Welcomes the user, surfaces key stats derived from real project
-// data, and lists recent projects with a shortcut to create more.
+// Dashboard — your books at a glance. Search, stage badges, one-click open.
+// "New Book" starts the guided wizard; every project opens in the unified
+// workspace.
 
-import Link from "next/link";
 import { useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { EmptyState, ErrorState } from "@/components/states/states";
-import { IconPlus, IconBook, IconProjects, IconCheck, IconExport } from "@/components/ui/icons";
-import { useProjects } from "@/hooks/use-projects";
-import { useUser } from "@clerk/nextjs";
-import { CreateProjectDialog } from "@/components/projects/create-project-dialog";
 import { useRouter } from "next/navigation";
-import { projectStatusStyle } from "@/lib/status";
+import { useProjects } from "@/hooks/use-projects";
+import { STAGE_LABELS, type ProjectStage } from "@/lib/api/studio";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton, Spinner } from "@/components/ui/skeleton";
+import { EmptyState, ErrorState } from "@/components/states/states";
+import { IconPlus, IconSearch, IconBook, IconSparkles } from "@/components/ui/icons";
+import { cn } from "@/lib/utils";
+import type { Project } from "@/types";
 
-function StatCard({
-  label,
-  value,
-  icon,
-  hint,
-}: {
-  label: string;
-  value: string | number;
-  icon: React.ReactNode;
-  hint?: string;
-}) {
-  return (
-    <Card>
-      <CardContent className="flex items-center gap-4 p-5">
-        <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary text-foreground">
-          {icon}
-        </div>
-        <div>
-          <p className="text-2xl font-semibold tracking-tight">{value}</p>
-          <p className="text-sm text-muted-foreground">{label}</p>
-          {hint ? <p className="text-xs text-muted-foreground/70">{hint}</p> : null}
-        </div>
-      </CardContent>
-    </Card>
-  );
+const STAGE_CHIPS: Record<string, string> = {
+  draft: "bg-secondary text-secondary-foreground",
+  generating: "bg-blue-500/10 text-blue-700 dark:text-blue-300",
+  review: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  ready_for_export: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  published: "bg-purple-500/10 text-purple-700 dark:text-purple-300",
+};
+
+function formatDate(value: string): string {
+  try {
+    return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
 }
 
 export default function DashboardPage() {
-  const { user } = useUser();
-  const { data, isLoading, isError, refetch } = useProjects();
-  const [createOpen, setCreateOpen] = useState(false);
   const router = useRouter();
+  const [search, setSearch] = useState("");
+  const { data: projects, isLoading, isError, refetch } = useProjects();
 
-  const stats = useMemo(() => {
-    const list = data ?? [];
-    const booksInProgress = list.filter((p) => p.status === "active" || p.status === "draft").length;
-    const completed = list.filter((p) => p.status === "completed").length;
-    const archived = list.filter((p) => p.status === "archived").length;
-    return { total: list.length, booksInProgress, completed, archived };
-  }, [data]);
-
-  const recent = useMemo(() => (data ?? []).slice(0, 5), [data]);
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return projects ?? [];
+    return (projects ?? []).filter((project) =>
+      [project.name, project.title, project.description ?? ""].some((field) =>
+        field.toLowerCase().includes(needle),
+      ),
+    );
+  }, [projects, search]);
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mx-auto max-w-6xl space-y-6 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Welcome back{user?.fullName ? `, ${user.fullName}` : ""}
-          </h1>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">Your books</h1>
           <p className="text-sm text-muted-foreground">
-            Here&apos;s what&apos;s happening across your books.
+            Every project opens in one workspace — write, review, validate, and export.
           </p>
         </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <IconPlus className="h-4 w-4" />
+        <Button onClick={() => router.push("/new-book")}>
+          <IconPlus className="mr-1.5 h-4 w-4" />
           New Book
         </Button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total Projects" value={stats.total} icon={<IconProjects className="h-5 w-5" />} />
-        <StatCard
-          label="Books In Progress"
-          value={stats.booksInProgress}
-          icon={<IconBook className="h-5 w-5" />}
-        />
-        <StatCard
-          label="Completed Books"
-          value={stats.completed}
-          icon={<IconCheck className="h-5 w-5" />}
-        />
-        <StatCard
-          label="Archived"
-          value={stats.archived}
-          icon={<IconExport className="h-5 w-5" />}
+      <div className="relative max-w-sm">
+        <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search your books…"
+          className="pl-9"
         />
       </div>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold tracking-tight">Recent projects</h2>
-          <Link href="/projects" className="text-sm font-medium text-primary hover:underline">
-            View all
-          </Link>
+      {isLoading ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <Skeleton key={index} className="h-36 rounded-xl" />
+          ))}
         </div>
-
-        {isLoading ? (
-          <div className="space-y-2">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-16 w-full rounded-lg" />
-            ))}
-          </div>
-        ) : isError ? (
-          <ErrorState message="We couldn't load your projects." onRetry={() => void refetch()} />
-        ) : recent.length === 0 ? (
-          <EmptyState
-            icon={<IconBook />}
-            title="No projects yet"
-            description="Create your first book project to get started."
-            action={{ label: "Create your first book", onClick: () => setCreateOpen(true) }}
-          />
-        ) : (
-          <div className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
-            {recent.map((project) => {
-              const status = projectStatusStyle(project.status);
-              return (
-                <Link
-                  key={project.id}
-                  href={`/workspace/${project.id}`}
-                  className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-secondary/50"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-foreground">{project.name}</p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {project.title || "Untitled book"}
-                    </p>
+      ) : isError ? (
+        <ErrorState
+          title="Couldn't load your books"
+          description="The backend may be offline. Try again in a moment."
+          action={{ label: "Retry", onClick: () => void refetch() }}
+        />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={<IconBook className="h-8 w-8" />}
+          title={search ? "No books match your search" : "Start your first book"}
+          description={
+            search
+              ? "Try a different title, topic, or keyword."
+              : "Tell the AI what to write and it plans, drafts, formats, and validates the whole book."
+          }
+          action={
+            search ? undefined : { label: "Create a book", onClick: () => router.push("/new-book") }
+          }
+        />
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {filtered.map((project: Project) => {
+            const stage = (STAGE_LABELS[project.stage as ProjectStage] ? project.stage : "draft") as ProjectStage;
+            return (
+              <Card key={project.id} className="flex flex-col transition-shadow hover:shadow-md">
+                <CardContent className="flex flex-1 flex-col gap-3 p-5">
+                  <div className="flex items-start justify-between gap-2">
+                    <button
+                      onClick={() => router.push(`/workspace/${project.id}`)}
+                      className="text-left text-base font-semibold tracking-tight text-foreground hover:text-primary"
+                    >
+                      {project.name}
+                    </button>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium",
+                        STAGE_CHIPS[stage],
+                      )}
+                    >
+                      {STAGE_LABELS[stage]}
+                    </span>
                   </div>
-                  <span className="shrink-0 rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
-                    {status.label}
-                  </span>
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </section>
 
-      <CreateProjectDialog
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        onCreated={(id) => {
-          setCreateOpen(false);
-          router.push(`/workspace/${id}`);
-        }}
-      />
+                  {project.description ? (
+                    <p className="line-clamp-2 text-sm text-muted-foreground">{project.description}</p>
+                  ) : null}
+
+                  <div className="mt-auto space-y-2 pt-2">
+                    <p className="text-xs text-muted-foreground">
+                      Updated {formatDate(project.updated_at)}
+                    </p>
+                    {stage === "generating" ? (
+                      <p className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-300">
+                        <Spinner className="h-3 w-3" />
+                        Generating in the background…
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-center gap-2 border-t border-border pt-3">
+                    <Button size="sm" variant="outline" className="flex-1" onClick={() => router.push(`/workspace/${project.id}`)}>
+                      Open workspace
+                    </Button>
+                    {stage === "draft" ? (
+                      <Button
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => router.push(`/workspace/${project.id}`)}
+                        title="Generate the book from this project"
+                      >
+                        <IconSparkles className="mr-1 h-3.5 w-3.5" />
+                        Generate
+                      </Button>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

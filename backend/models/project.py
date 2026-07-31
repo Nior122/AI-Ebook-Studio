@@ -40,6 +40,7 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)
+    stage: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     metadata_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
 

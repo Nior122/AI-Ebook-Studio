@@ -19,6 +19,7 @@ export interface User {
   id: string;
   email: string;
   status: string;
+  stage: string;
   is_email_verified: boolean;
   created_at: string;
   profile: UserProfile;
@@ -55,6 +56,7 @@ export interface Workspace {
   id: string;
   name: string;
   status: string;
+  stage: string;
   created_at: string;
   updated_at: string;
 }
@@ -73,6 +75,7 @@ export interface Project {
   title: string;
   description: string | null;
   status: string;
+  stage: string;
   is_favorite: boolean;
   created_at: string;
   updated_at: string;
@@ -110,6 +113,7 @@ export interface Book {
   target_audience: string | null;
   writing_style: string | null;
   status: string;
+  stage: string;
   metadata_json?: { writing_book_id?: string } | null;
   created_at: string;
   updated_at: string;
@@ -148,6 +152,7 @@ export interface Chapter {
   content: string;
   word_count: number;
   status: string;
+  stage: string;
   created_at: string;
   updated_at: string;
 }
@@ -455,6 +460,7 @@ export interface BookWorkflow {
   book_id: string;
   current_step: string;
   status: string;
+  stage: string;
   has_brief: boolean;
   has_blueprint: boolean;
   chapter_count: number;
@@ -522,6 +528,7 @@ export interface EditingSession {
   user_id: string;
   mode: EditingMode;
   status: string;
+  stage: string;
   created_at: string;
   completed_at: string | null;
   suggestions: EditingSuggestion[];

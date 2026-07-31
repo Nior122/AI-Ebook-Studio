@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     ai_default_provider: str = "openai"
     ai_default_model: str = "openai/gpt-4o-mini"
     ai_fallback_enabled: bool = True
-    ai_fallback_provider: str | None = None
+    ai_fallback_provider: str | None = "local"
     ai_fallback_model: str | None = None
 
     # --- Storage abstraction ---

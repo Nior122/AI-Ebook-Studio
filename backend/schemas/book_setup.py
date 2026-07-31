@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 CreativityLevel = Literal["creative", "balanced", "precise", "fast"]
 SpeedLevel = Literal["fast", "balanced", "thorough"]
+ReadingLevel = Literal["basic", "intermediate", "advanced", "general"]
+WritingQuality = Literal["draft", "polished", "publication"]
 
 
 class AIGenerationSettings(BaseModel):
@@ -28,6 +30,16 @@ class AIGenerationSettings(BaseModel):
     provider: str = Field(default="openrouter", description="AI provider id")
     model: str = Field(default="openai/gpt-4o-mini", description="Model id")
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    # --- Studio UX additions ---
+    reading_level: ReadingLevel | None = Field(
+        default=None, description="Target reading level of the book"
+    )
+    writing_quality: WritingQuality | None = Field(
+        default=None, description="Polish target for the generated prose"
+    )
+    use_citations: bool = False
+    generate_exercises: bool = False
+    generate_summaries: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +68,9 @@ class LayoutSettings(BaseModel):
     image_width: float = 6.0
     image_ratio: ImageRatio = "16:9"
     default_image_style: ImageStyle = "realistic"
+    # --- Studio UX additions ---
+    chapter_heading_style: Literal["numbered", "plain", "decorative"] = "numbered"
+    image_aspect: ImageRatio = "16:9"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +106,11 @@ class BookDetails(BaseModel):
     tone: WritingTone = "conversational"
     writing_style: WritingStyle = "practical_guide"
     language: str = Field(default="en", max_length=20)
+    # --- Studio UX additions ---
+    author: str | None = Field(default=None, max_length=220, description="Author name")
+    book_purpose: str | None = Field(
+        default=None, max_length=2000, description="What the book should achieve for the reader"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +124,8 @@ class BookSize(BaseModel):
 
     total_word_count: int = Field(ge=1000, le=200000)
     custom: bool = False
+    # --- Studio UX addition: user may override the estimated chapter count ---
+    chapters_override: int | None = Field(default=None, ge=1, le=60)
 
     @property
     def estimated_chapter_count(self) -> int:
@@ -119,6 +141,11 @@ class BookSize(BaseModel):
         if self.total_word_count <= 50000:
             return 20
         return 25
+
+    @property
+    def effective_chapter_count(self) -> int:
+        """Chapter count after applying the user's override, if any."""
+        return self.chapters_override or self.estimated_chapter_count
 
 
 # ---------------------------------------------------------------------------

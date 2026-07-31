@@ -18,6 +18,7 @@ from api.v1.jobs import router as jobs_router
 from api.v1.kdp import router as kdp_router
 from api.v1.marketing import router as marketing_router
 from api.v1.projects import router as projects_router
+from api.v1.studio import router as studio_router
 from api.v1.translation import router as translation_router
 from api.v1.workspaces import router as workspaces_router
 from schemas.system import HealthResponse, VersionResponse
@@ -26,6 +27,7 @@ router = APIRouter(tags=["system"])
 router.include_router(auth_router)
 router.include_router(workspaces_router)
 router.include_router(projects_router)
+router.include_router(studio_router)
 router.include_router(books_router)
 router.include_router(book_writing_router)
 router.include_router(editing_router)

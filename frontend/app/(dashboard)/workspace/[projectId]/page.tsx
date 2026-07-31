@@ -1,419 +1,735 @@
 "use client";
 
+// Unified book workspace — the single place to review, write, and publish a book.
+// Left: chapters / outline / bookmarks / versions / activity.
+// Center: rich text editor with autosave + AI quick actions.
+// Right: AI assistant, proofreader, images, cover, marketing, translation,
+// validator, export. A floating progress panel tracks background generation.
+//
+// Everything is wired end-to-end: UI -> API -> backend -> database, with live
+// WebSocket updates for progress, activities, notifications, and versions.
+
 import { use, useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { useToast } from "@/components/ui/toast";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useProject } from "@/hooks/use-projects";
 import { useProjectBook } from "@/hooks/use-books";
 import { bookWritingApi } from "@/lib/api/bookWriting";
-import { editingApi } from "@/lib/api/editing";
-import { jobsApi } from "@/lib/api/jobs";
-import { JobProgressCard } from "@/components/shared/job-progress-card";
-import type { WritingChapter } from "@/types/api";
+import { studioApi, type ProjectStage } from "@/lib/api/studio";
+import { toastError } from "@/lib/errors";
+import { useToast } from "@/components/ui/toast";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/skeleton";
 import {
-  IconBook, IconSparkles, IconExport, IconPlus, IconChevronRight,
-  IconChevronLeft, IconImage, IconCover, IconCheck, IconTranslate,
-  IconMarketing, IconProof,
+  IconMenu,
+  IconClose,
+  IconSparkles,
+  IconBook,
+  IconHistory,
+  IconProof,
+  IconExport,
+  IconImage,
+  IconCover,
+  IconCheck,
+  IconTranslate,
+  IconMarketing,
+  IconPen,
 } from "@/components/ui/icons";
+import { useAutosave } from "@/hooks/use-autosave";
+import { useShortcuts } from "@/hooks/use-shortcuts";
+import { useStudioSocket, type StudioWsEvent } from "@/hooks/use-studio-ws";
+import { RichEditor } from "@/components/studio/rich-editor";
+import { ProgressPanel } from "@/components/studio/progress-panel";
+import { NotificationCenter } from "@/components/studio/notification-center";
+import { StageBadge } from "@/components/studio/stage-badge";
+import { ActivityTimeline } from "@/components/studio/activity-timeline";
+import { SearchBox } from "@/components/studio/search-box";
+import {
+  AssistantPanel,
+  ExportPanel,
+  ImagesPanel,
+  CoverPanel,
+  ValidatorPanel,
+  ProofreaderPanel,
+  TranslationPanel,
+  MarketingPanel,
+} from "@/components/studio/panels";
 
-type LeftTab = "chapters" | "outline" | "versions";
-type RightTool = "export" | "images" | "cover" | "validator" | "translate" | "marketing" | "proofread" | null;
+type LeftTab = "chapters" | "outline" | "bookmarks" | "versions" | "activity";
 
-interface Tool { key: RightTool; label: string; icon: React.FC<React.SVGProps<SVGSVGElement>> }
-
-const TOOLS: Tool[] = [
-  { key: "export", label: "Export", icon: IconExport },
-  { key: "images", label: "Images", icon: IconImage },
-  { key: "cover", label: "Book Cover", icon: IconCover },
-  { key: "validator", label: "KDP Validator", icon: IconCheck },
-  { key: "proofread", label: "Proofreader", icon: IconProof },
-  { key: "translate", label: "Translate", icon: IconTranslate },
-  { key: "marketing", label: "Marketing", icon: IconMarketing },
+const LEFT_TABS: Array<{ key: LeftTab; label: string }> = [
+  { key: "chapters", label: "Chapters" },
+  { key: "outline", label: "Outline" },
+  { key: "bookmarks", label: "Bookmarks" },
+  { key: "versions", label: "Versions" },
+  { key: "activity", label: "Activity" },
 ];
 
-// ---- Version History sub-component ------------------------------------------
-function VersionHistory({ chapterId }: { chapterId: string }) {
-  const { data: versions } = useQuery({
-    queryKey: ["chapter-versions", chapterId],
-    queryFn: () => bookWritingApi.listVersions(chapterId),
-    enabled: Boolean(chapterId),
-  });
-  if (!versions || versions.length === 0) return <p className="text-xs text-muted-foreground p-2">No versions yet.</p>;
-  return versions.slice(0, 10).map(v => (
-    <div key={v.id} className="rounded border border-border p-2 text-[10px]">
-      <span className="font-medium">v{v.version_number}</span>
-      <Badge variant="outline" className="ml-2 text-[9px]">{v.version_type}</Badge>
-      <span className="ml-2 text-muted-foreground">{v.word_count}w</span>
-    </div>
-  ));
-}
+const TOOLS: Array<{ key: string; label: string; icon: React.FC<React.SVGProps<SVGSVGElement>> }> = [
+  { key: "assistant", label: "AI Assistant", icon: IconSparkles },
+  { key: "proofreader", label: "Proofreader", icon: IconProof },
+  { key: "images", label: "Images", icon: IconImage },
+  { key: "cover", label: "Cover", icon: IconCover },
+  { key: "marketing", label: "Marketing", icon: IconMarketing },
+  { key: "translation", label: "Translate", icon: IconTranslate },
+  { key: "validator", label: "KDP Validator", icon: IconCheck },
+  { key: "export", label: "Export", icon: IconExport },
+];
 
-// ---- Right panel tool sub-components ----------------------------------------
-function ExportPanel({ bookId }: { bookId: string }) {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [fmt, setFmt] = useState("docx");
-  const toast = useToast();
-  async function start() {
-    try { const r = await jobsApi.startExport(bookId, fmt as "docx" | "pdf" | "epub"); setJobId(r.id); }
-    catch (e) { toast({ title: "Export failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <div className="flex gap-1">
-        {(["docx", "pdf", "epub"] as const).map(f => (
-          <button key={f} onClick={() => setFmt(f)} className={`rounded px-2 py-1 text-[10px] font-medium ${fmt === f ? "bg-primary text-primary-foreground" : "bg-secondary"}`}>.{f.toUpperCase()}</button>
-        ))}
-      </div>
-      <Button size="sm" className="w-full" onClick={start}><IconExport className="mr-1 h-3 w-3" /> Export {fmt.toUpperCase()}</Button>
-      {jobId && <JobProgressCard jobId={jobId} title={`${fmt.toUpperCase()} export`} />}
-    </div>
-  );
-}
+const AI_ACTIONS: Array<{ key: "fix_grammar" | "shorten" | "expand" | "continue" | "rewrite"; label: string }> = [
+  { key: "fix_grammar", label: "Fix grammar" },
+  { key: "shorten", label: "Shorten" },
+  { key: "expand", label: "Expand" },
+  { key: "continue", label: "Continue" },
+  { key: "rewrite", label: "Rewrite" },
+];
 
-function CoverPanel({ bookId }: { bookId: string }) {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const toast = useToast();
-  async function generate() {
-    try { const r = await jobsApi.startCover(bookId); setJobId(r.id); }
-    catch (e) { toast({ title: "Cover failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <p className="text-xs text-muted-foreground">Generate a professional book cover</p>
-      <Button size="sm" className="w-full" onClick={generate}><IconCover className="mr-1 h-3 w-3" /> Generate cover</Button>
-      {jobId && <JobProgressCard jobId={jobId} title="Cover generation" />}
-    </div>
-  );
-}
+const SAVE_LABELS: Record<string, string> = {
+  idle: "All changes saved",
+  saving: "Saving…",
+  saved: "Saved",
+  failed: "Save failed — retrying",
+};
 
-function KdpPanel({ bookId }: { bookId: string }) {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const toast = useToast();
-  async function run() {
-    try { const r = await jobsApi.startKdpValidate(bookId); setJobId(r.id); }
-    catch (e) { toast({ title: "Validation failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <p className="text-xs text-muted-foreground">Check your book against KDP requirements</p>
-      <Button size="sm" className="w-full" onClick={run}><IconCheck className="mr-1 h-3 w-3" /> Run validation</Button>
-      {jobId && <JobProgressCard jobId={jobId} title="KDP validation" />}
-    </div>
-  );
-}
-
-function ProofreadPanel({ chapterId }: { chapterId: string | null }) {
-  const toast = useToast();
-  const qc = useQueryClient();
-  const { data: suggestions } = useQuery({
-    queryKey: ["editing-suggestions", chapterId],
-    queryFn: () => editingApi.listSuggestions(chapterId!, { status: "pending" }),
-    enabled: Boolean(chapterId),
-  });
-  async function run() {
-    if (!chapterId) return;
-    try {
-      await editingApi.review(chapterId, { mode: "proofreading" });
-      void qc.invalidateQueries({ queryKey: ["editing-suggestions", chapterId] });
-      toast({ title: "Review complete", variant: "success" });
-    } catch (e) { toast({ title: "Review failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <p className="text-xs text-muted-foreground">Catch grammar, spelling, and style issues</p>
-      <Button size="sm" className="w-full" onClick={run} disabled={!chapterId}><IconProof className="mr-1 h-3 w-3" /> Proofread chapter</Button>
-      {suggestions && suggestions.length > 0 && <p className="text-[10px] text-muted-foreground">{suggestions.length} pending suggestions</p>}
-    </div>
-  );
-}
-
-function TranslatePanel({ bookId }: { bookId: string }) {
-  const [target, setTarget] = useState("es");
-  const [jobId, setJobId] = useState<string | null>(null);
-  const toast = useToast();
-  const langs = [{ code: "es", name: "Spanish" }, { code: "fr", name: "French" }, { code: "de", name: "German" }, { code: "pt", name: "Portuguese" }, { code: "it", name: "Italian" }, { code: "ja", name: "Japanese" }, { code: "zh", name: "Chinese" }, { code: "ar", name: "Arabic" }, { code: "ru", name: "Russian" }, { code: "ko", name: "Korean" }, { code: "nl", name: "Dutch" }];
-  async function start() {
-    try { const r = await jobsApi.startTranslation(bookId, "en", target); setJobId(r.id); }
-    catch (e) { toast({ title: "Translation failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <select className="w-full rounded border border-input bg-background px-2 py-1 text-xs" value={target} onChange={(e) => setTarget((e.target as HTMLSelectElement).value)}>
-        {langs.map(l => <option key={l.code} value={l.code}>{l.name}</option>)}
-      </select>
-      <Button size="sm" className="w-full" onClick={start}><IconTranslate className="mr-1 h-3 w-3" /> Translate</Button>
-      {jobId && <JobProgressCard jobId={jobId} title={`Translation to ${target}`} />}
-    </div>
-  );
-}
-
-function MarketingPanel({ bookId }: { bookId: string }) {
-  const [asset, setAsset] = useState("amazon_description");
-  const [jobId, setJobId] = useState<string | null>(null);
-  const toast = useToast();
-  const items = [
-    { value: "amazon_description", name: "Amazon Description" },
-    { value: "social_post", name: "Social Post" },
-    { value: "email_blast", name: "Email Blast" },
-    { value: "press_release", name: "Press Release" },
-    { value: "author_bio", name: "Author Bio" },
-  ];
-  async function generate() {
-    try { const r = await jobsApi.startMarketing(bookId, asset); setJobId(r.id); }
-    catch (e) { toast({ title: "Marketing generation failed", description: String(e), variant: "error" }); }
-  }
-  return (
-    <div className="space-y-2 p-1">
-      <select className="w-full rounded border border-input bg-background px-2 py-1 text-xs" value={asset} onChange={(e) => setAsset((e.target as HTMLSelectElement).value)}>
-        {items.map(a => <option key={a.value} value={a.value}>{a.name}</option>)}
-      </select>
-      <Button size="sm" className="w-full" onClick={generate}><IconMarketing className="mr-1 h-3 w-3" /> Generate</Button>
-      {jobId && <JobProgressCard jobId={jobId} title={`Marketing: ${asset}`} />}
-    </div>
-  );
-}
-
-function ImagesPanel() {
-  return <p className="text-xs text-muted-foreground p-2">AI image generation coming soon.</p>;
-}
-
-// ---- Main Workspace Page ----------------------------------------------------
-export default function BookWorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
+export default function WorkspacePage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const toast = useToast();
-  const qc = useQueryClient();
+  const queryClient = useQueryClient();
 
+  const { data: project } = useProject(projectId);
   const { data: book } = useProjectBook(projectId);
-  const writingBookId = (book?.metadata_json as Record<string, unknown> | undefined)?.writing_book_id as string | undefined;
 
-  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
-  const [editorContent, setEditorContent] = useState("");
-  const [saveStatus, setSaveStatus] = useState<"saved" | "unsaved" | "saving" | "failed">("saved");
+  const [leftTab, setLeftTab] = useState<LeftTab>("chapters");
+  const [rightTool, setRightTool] = useState<string | null>(searchParams.get("tool") ?? "assistant");
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
-  const [leftTab, setLeftTab] = useState<LeftTab>("chapters");
-  const [rightTool, setRightTool] = useState<RightTool>(null);
-  const [lastSaved, setLastSaved] = useState(Date.now());
+  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  const [editorContent, setEditorContent] = useState("");
+  const [wsTick, setWsTick] = useState(0);
+  const [versionDraft, setVersionDraft] = useState("");
+  const [activeJobId, setActiveJobId] = useState<string | null>(searchParams.get("generating"));
+  const insertMarkdownRef = useRef<((markdown: string) => void) | null>(null);
 
-  const { data: chapters } = useQuery({
-    queryKey: ["writing-chapters", writingBookId],
-    queryFn: () => bookWritingApi.listChapters(writingBookId!),
-    enabled: Boolean(writingBookId),
+  const bookId = book?.metadata_json?.writing_book_id ?? null;
+
+  const { data: chapters = [], isLoading: chaptersLoading } = useQuery({
+    queryKey: ["writing-chapters", projectId],
+    queryFn: () => bookWritingApi.listChapters(bookId as string),
+    enabled: Boolean(bookId),
   });
+  const writingBookId = bookId ?? chapters[0]?.book_id ?? null;
 
-  const { data: blueprint } = useQuery({
-    queryKey: ["writing-blueprint", writingBookId],
-    queryFn: () => bookWritingApi.getBlueprint(writingBookId!),
-    enabled: Boolean(writingBookId) && leftTab === "outline",
-  });
+  const activeChapter = chapters.find((chapter) => chapter.id === activeChapterId) ?? null;
 
-  const { data: brief } = useQuery({
-    queryKey: ["writing-brief", writingBookId],
-    queryFn: () => bookWritingApi.getBrief(writingBookId!),
-    enabled: Boolean(writingBookId) && leftTab === "outline",
-  });
-
+  // Load chapter content into the editor when switching chapters.
   useEffect(() => {
-    if (chapters && chapters.length > 0 && !activeChapterId) {
-      setActiveChapterId(chapters[0].id);
-      setEditorContent(chapters[0].content);
-    }
-  }, [chapters, activeChapterId]);
+    if (activeChapter) setEditorContent(activeChapter.content ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChapterId]);
 
-  const createChapterM = useMutation({
-    mutationFn: (title: string) => bookWritingApi.createChapter(writingBookId!, { title }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["writing-chapters", writingBookId] });
-      toast({ title: "Chapter added", variant: "success" });
+  const autosave = useAutosave(projectId, activeChapterId, editorContent);
+
+  const selectChapter = useCallback(
+    async (chapterId: string) => {
+      await autosave.saveNow();
+      setActiveChapterId(chapterId);
+    },
+    [autosave],
+  );
+
+  const refreshProjectData = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["writing-chapters", projectId] });
+    void queryClient.invalidateQueries({ queryKey: ["project-book", projectId] });
+    void queryClient.invalidateQueries({ queryKey: ["projects", "detail", projectId] });
+  }, [queryClient, projectId]);
+
+  const handleWsEvent = useCallback(
+    (event: StudioWsEvent) => {
+      if (event.type === "job.progress") {
+        const jobId = event.payload.job_id;
+        if (typeof jobId === "string") setActiveJobId(jobId);
+        return;
+      }
+      if (event.type === "job.terminal") {
+        const status = event.payload.status;
+        const title = String(event.payload.title ?? "Job finished");
+        if (status === "COMPLETED") {
+          toast({ title, variant: "success" });
+          refreshProjectData();
+        } else if (status === "FAILED") {
+          toast({ title, description: String(event.payload.body ?? ""), variant: "error" });
+        }
+        setWsTick((tick) => tick + 1);
+        return;
+      }
+      if (event.type === "activity.created" || event.type === "notification.created") {
+        setWsTick((tick) => tick + 1);
+        return;
+      }
+      if (event.type === "version.restored") {
+        refreshProjectData();
+        toast({ title: "Version restored", variant: "success" });
+        return;
+      }
+      if (event.type === "generation.completed") {
+        refreshProjectData();
+        toast({
+          title: "Book generation complete",
+          description: "Your book is ready to review in the editor.",
+          variant: "success",
+        });
+        return;
+      }
+      if (event.type === "stage.changed") {
+        void queryClient.invalidateQueries({ queryKey: ["projects", "detail", projectId] });
+      }
+    },
+    [queryClient, projectId, refreshProjectData, toast],
+  );
+  useStudioSocket(projectId, handleWsEvent);
+
+  useShortcuts({
+    onSave: () => {
+      void autosave.saveNow();
+    },
+    onSearch: () => {
+      document.querySelector<HTMLInputElement>("[data-search-input]")?.focus();
     },
   });
 
-  const autosaveM = useMutation({
-    mutationFn: ({ cid, content }: { cid: string; content: string }) =>
-      bookWritingApi.autosave(writingBookId!, cid, content),
-    onSuccess: () => { setSaveStatus("saved"); setLastSaved(Date.now()); },
-    onError: () => setSaveStatus("failed"),
-  });
-
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const doSave = useCallback((cid: string, content: string) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      setSaveStatus("saving");
-      autosaveM.mutate({ cid, content });
-    }, 1500);
-  }, [autosaveM]);
-
-  const handleChange = (val: string) => {
-    setEditorContent(val);
-    setSaveStatus("unsaved");
-    if (activeChapterId) doSave(activeChapterId, val);
-  };
-
-  const handleAiAction = async (action: string) => {
-    if (!activeChapterId) return;
-    try {
-      let result: WritingChapter;
-      switch (action) {
-        case "generate": result = await bookWritingApi.generateChapter(activeChapterId); break;
-        case "continue": result = await bookWritingApi.continueChapter(activeChapterId); break;
-        case "rewrite": result = await bookWritingApi.rewriteChapter(activeChapterId, {}); break;
-        case "expand": result = await bookWritingApi.expandChapter(activeChapterId, {}); break;
-        default: return;
+  const runAiAction = useCallback(
+    async (action: "fix_grammar" | "shorten" | "expand" | "continue" | "rewrite") => {
+      if (!activeChapterId) {
+        toast({ title: "Select a chapter first", variant: "info" });
+        return;
       }
-      setEditorContent(result.content);
-      qc.invalidateQueries({ queryKey: ["writing-chapters", writingBookId] });
-      toast({ title: "Chapter updated", variant: "success" });
-    } catch (e) { toast({ title: "Failed", description: String(e), variant: "error" }); }
-  };
+      try {
+        const response = await studioApi.assistant(projectId, {
+          message: `Apply ${action.replace("_", " ")} to this chapter.`,
+          chapter_id: activeChapterId,
+          action,
+        });
+        if (response.applied && response.new_content) {
+          setEditorContent(response.new_content);
+          toast({ title: `${action.replace("_", " ")} applied`, variant: "success" });
+        } else {
+          toast({ title: response.reply, variant: "info" });
+        }
+      } catch (error) {
+        toast(toastError(error));
+      }
+    },
+    [activeChapterId, projectId, toast],
+  );
 
-  if (!writingBookId) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 gap-4">
-        <IconBook className="h-12 w-12 text-muted-foreground" />
-        <h2 className="text-lg font-semibold">No book in this project</h2>
-        <p className="text-sm text-muted-foreground text-center">Generate a book from the new book page first.</p>
-        <Button onClick={() => router.push("/new-book")}><IconPlus className="mr-2 h-4 w-4" />Create a book</Button>
-      </div>
-    );
-  }
+  const onGenerationDone = useCallback(
+    (job: { status: string }) => {
+      if (job.status === "COMPLETED") {
+        refreshProjectData();
+        toast({ title: "Book generation complete", variant: "success" });
+      }
+      setActiveJobId(null);
+      router.replace(`/workspace/${projectId}`);
+    },
+    [projectId, refreshProjectData, router, toast],
+  );
 
-  const saveLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "saved"
-    ? `Saved ${Math.floor((Date.now() - lastSaved) / 1000)}s ago`
-    : saveStatus === "unsaved" ? "Unsaved" : "Save failed";
+  const stage = (project?.stage ?? "draft") as ProjectStage;
+  const saveLabel = SAVE_LABELS[autosave.status] ?? SAVE_LABELS.idle;
 
   return (
-    <div className="flex h-[calc(100vh-6rem)] -mx-4 -my-6">
-      {/* ========== LEFT PANEL ========== */}
-      {leftOpen && (
-        <div className="flex h-full w-60 flex-shrink-0 flex-col border-r border-border bg-card">
-          <div className="flex border-b border-border">
-            {(["chapters", "outline", "versions"] as LeftTab[]).map(t => (
-              <button key={t} onClick={() => setLeftTab(t)}
-                className={`flex-1 py-2 text-xs font-medium ${
-                  leftTab === t ? "border-b-2 border-primary text-foreground" : "text-muted-foreground"
-                }`}>
-                {t === "chapters" ? "Chapters" : t === "outline" ? "Outline" : "Versions"}
-              </button>
-            ))}
-            <Button variant="ghost" size="sm" onClick={() => setLeftOpen(false)}><IconChevronLeft className="h-3.5 w-3.5" /></Button>
+    <div className="flex h-[calc(100vh-3.5rem)] min-h-0 flex-col bg-background">
+      {/* ===== Header ===== */}
+      <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/60 px-4 py-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="lg:hidden"
+          onClick={() => setLeftOpen((open) => !open)}
+          aria-label="Toggle chapters panel"
+        >
+          <IconMenu className="h-4 w-4" />
+        </Button>
+        <div className="min-w-0">
+          <h1 className="truncate text-sm font-semibold text-foreground">
+            {project?.title ?? "Book Workspace"}
+          </h1>
+          <p className="text-[10px] text-muted-foreground">
+            {saveLabel}
+            {autosave.lastSavedAt
+              ? ` · Last saved ${autosave.lastSavedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`
+              : ""}
+          </p>
+        </div>
+
+        <div className="ml-2 hidden md:block">
+          <StageBadge
+            projectId={projectId}
+            stage={stage}
+            onChanged={() => void queryClient.invalidateQueries({ queryKey: ["projects", "detail", projectId] })}
+          />
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <div className="hidden sm:block">
+            <SearchBox
+              projectId={projectId}
+              onSelectChapter={(chapterId) => void selectChapter(chapterId)}
+              onInsertImage={(markdown) => insertMarkdownRef.current?.(markdown)}
+            />
           </div>
-          <div className="flex-1 overflow-y-auto">
-            {leftTab === "chapters" && (
-              <div className="p-2 space-y-0.5">
-                <div className="flex items-center justify-between px-2 py-1">
-                  <span className="text-[10px] text-muted-foreground font-medium uppercase">Chapters</span>
-                  <Button variant="ghost" size="sm" onClick={() => { const t = window.prompt("Chapter title:"); if (t) createChapterM.mutate(t); }}><IconPlus className="h-3.5 w-3.5" /></Button>
-                </div>
-                {chapters?.map(ch => (
-                  <button key={ch.id} onClick={() => { setActiveChapterId(ch.id); setEditorContent(ch.content); }}
-                    className={`w-full rounded px-2 py-1.5 text-left text-xs transition-colors ${ch.id === activeChapterId ? "bg-secondary" : "hover:bg-secondary/50"}`}>
-                    <div className="font-medium truncate">{ch.chapter_number}. {ch.title}</div>
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <Badge variant="outline" className="text-[9px] py-0 h-4">{ch.status}</Badge>
-                      <span className="text-[10px] text-muted-foreground">{ch.actual_word_count}w</span>
-                    </div>
+          <NotificationCenter refreshSignal={wsTick} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="lg:hidden"
+            onClick={() => setRightOpen((open) => !open)}
+            aria-label="Toggle tools panel"
+          >
+            <IconSparkles className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
+
+      {/* ===== Body: three panels ===== */}
+      <div className="flex min-h-0 flex-1">
+        {/* ===== LEFT PANEL ===== */}
+        {leftOpen ? (
+          <aside className="fixed inset-y-[3.5rem] left-0 z-40 flex w-64 flex-col border-r border-border bg-card lg:static lg:z-auto lg:inset-auto lg:w-60">
+            <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
+              <nav className="flex gap-0.5 overflow-x-auto">
+                {LEFT_TABS.map((tab) => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setLeftTab(tab.key)}
+                    className={`shrink-0 rounded-md px-2 py-1 text-xs font-medium ${
+                      leftTab === tab.key
+                        ? "bg-secondary text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {tab.label}
                   </button>
                 ))}
-              </div>
-            )}
+              </nav>
+              <Button variant="ghost" size="sm" className="lg:hidden" onClick={() => setLeftOpen(false)}>
+                <IconClose className="h-3.5 w-3.5" />
+              </Button>
+            </div>
 
-            {leftTab === "outline" && (
-              <div className="p-2 space-y-3 text-xs">
-                {brief?.working_title && (
-                  <div className="rounded bg-secondary/30 p-2">
-                    <div className="font-medium">{brief.working_title}</div>
-                    {brief.subtitle && <div className="text-muted-foreground">{brief.subtitle}</div>}
-                  </div>
-                )}
-                {brief?.book_purpose && <div><span className="font-medium text-muted-foreground">Purpose: </span>{brief.book_purpose}</div>}
-                <div><span className="font-medium text-muted-foreground">Chapters: </span>{chapters?.length ?? 0}</div>
-                {blueprint?.chapters && blueprint.chapters.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="font-medium text-muted-foreground">Structure:</p>
-                    {blueprint.chapters.map((ch, i) => (
-                      <div key={i} className="pl-2 border-l-2 border-border">
-                        <span className="font-medium">{i + 1}. {ch.title}</span>
-                        {ch.objective && <p className="text-[10px] text-muted-foreground">{ch.objective}</p>}
-                        {ch.estimated_word_count && <p className="text-[10px] text-muted-foreground">~{ch.estimated_word_count}w</p>}
-                      </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {leftTab === "chapters" ? (
+                chaptersLoading ? (
+                  <Spinner label="Loading chapters…" />
+                ) : chapters.length === 0 ? (
+                  <p className="p-3 text-xs text-muted-foreground">
+                    No chapters yet — press <span className="font-medium">Generate Book</span> from the
+                    New Book page and the editor will open here automatically.
+                  </p>
+                ) : (
+                  <ul className="space-y-1">
+                    {chapters.map((chapter) => (
+                      <li key={chapter.id}>
+                        <button
+                          onClick={() => void selectChapter(chapter.id)}
+                          className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs ${
+                            chapter.id === activeChapterId
+                              ? "bg-primary/10 text-foreground"
+                              : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          }`}
+                        >
+                          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded bg-secondary text-[9px] font-semibold text-muted-foreground">
+                            {chapter.chapter_number}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium text-foreground">{chapter.title}</span>
+                            <span className="text-[10px] text-muted-foreground">
+                              {chapter.actual_word_count.toLocaleString()} words
+                              {chapter.status === "failed" ? " · failed" : ""}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
                     ))}
-                  </div>
-                )}
-              </div>
-            )}
+                  </ul>
+                )
+              ) : null}
 
-            {leftTab === "versions" && (
-              <div className="p-2 space-y-2">
-                {activeChapterId ? <VersionHistory chapterId={activeChapterId} /> : <p className="text-xs text-muted-foreground p-2">Select a chapter to see version history.</p>}
+              {leftTab === "outline" ? (
+                <ul className="space-y-2">
+                  {chapters.map((chapter) => (
+                    <li
+                      key={chapter.id}
+                      className="rounded-lg border border-border p-2"
+                      onClick={() => void selectChapter(chapter.id)}
+                    >
+                      <p className="text-xs font-medium text-foreground">
+                        {chapter.chapter_number}. {chapter.title}
+                      </p>
+                      {chapter.objective ? (
+                        <p className="mt-0.5 line-clamp-3 text-[11px] text-muted-foreground">
+                          {chapter.objective}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {leftTab === "bookmarks" ? <BookmarksTab projectId={projectId} activeChapter={activeChapter} onSelectChapter={selectChapter} /> : null}
+              {leftTab === "versions" ? (
+                <VersionsTab projectId={projectId} refreshSignal={wsTick} />
+              ) : null}
+              {leftTab === "activity" ? <ActivityTimeline projectId={projectId} refreshSignal={wsTick} /> : null}
+            </div>
+          </aside>
+        ) : null}
+
+        {/* ===== CENTER: EDITOR ===== */}
+        <div className="flex min-w-0 flex-1 flex-col border-x border-border">
+          {activeChapter ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-card/30 px-3 py-1.5">
+              <span className="mr-1 flex items-center gap-1 text-xs font-medium text-foreground">
+                <IconPen className="h-3.5 w-3.5" />
+                <span className="max-w-[16rem] truncate">{activeChapter.title}</span>
+              </span>
+              {AI_ACTIONS.map((action) => (
+                <button
+                  key={action.key}
+                  onClick={() => void runAiAction(action.key)}
+                  className="rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  <IconSparkles className="mr-1 inline h-3 w-3" />
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="min-h-0 flex-1">
+            {activeChapter ? (
+              <RichEditor
+                value={editorContent}
+                onChange={setEditorContent}
+                insertMarkdownRef={insertMarkdownRef}
+                placeholder="Start writing your chapter…"
+              />
+            ) : chapters.length > 0 ? (
+              <div className="flex h-full items-center justify-center p-6 text-center">
+                <div>
+                  <IconBook className="mx-auto h-8 w-8 text-muted-foreground" />
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Select a chapter from the left panel to start editing.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center p-6 text-center">
+                <div>
+                  <IconSparkles className="mx-auto h-8 w-8 text-muted-foreground" />
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    This book has no chapters yet. Go to{" "}
+                    <button
+                      className="font-medium text-primary hover:underline"
+                      onClick={() => router.push("/new-book")}
+                    >
+                      New Book
+                    </button>{" "}
+                    and generate one — the editor will open automatically.
+                  </p>
+                </div>
               </div>
             )}
           </div>
         </div>
-      )}
-      {!leftOpen && (
-        <Button variant="outline" size="sm" className="self-start mt-4 rounded-l-md h-8" onClick={() => setLeftOpen(true)}>
-          <IconChevronRight className="h-3.5 w-3.5" />
-        </Button>
-      )}
 
-      {/* ========== CENTER EDITOR ========== */}
-      <div className="flex flex-1 flex-col min-w-0 border-x border-border">
-        <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-card/50 shrink-0">
-          <h2 className="text-sm font-semibold truncate">{book?.title ?? "Book Workspace"}</h2>
-          <span className={`text-xs ${saveStatus === "saving" ? "text-amber-600" : saveStatus === "saved" ? "text-emerald-600" : saveStatus === "failed" ? "text-red-600" : "text-muted-foreground"}`}>{saveLabel}</span>
-        </div>
-        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-card/30 shrink-0">
-          {(["generate", "continue", "rewrite", "expand"] as const).map(a => (
-            <button key={a} className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-secondary" onClick={() => handleAiAction(a)} disabled={!activeChapterId}>
-              <IconSparkles className="mr-1 h-3.5 w-3.5 inline" /> {a === "generate" ? "Write" : a === "continue" ? "Continue" : a === "rewrite" ? "Rewrite" : "Expand"}
-            </button>
-          ))}
-        </div>
-        <div className="flex-1 overflow-y-auto p-4">
-          {activeChapterId ? (
-            <Textarea className="min-h-full w-full rounded-md border border-input bg-background px-4 py-3 text-sm leading-relaxed resize-none" value={editorContent} onChange={e => handleChange(e.target.value)} placeholder="Your chapter content…" />
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Select a chapter from the left panel to start editing.</div>
-          )}
-        </div>
+        {/* ===== RIGHT TOOLS PANEL ===== */}
+        {rightOpen ? (
+          <aside className="fixed inset-y-[3.5rem] right-0 z-40 flex w-64 flex-col border-l border-border bg-card lg:static lg:z-auto lg:inset-auto lg:w-72">
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
+              <h3 className="text-sm font-semibold text-foreground">
+                {TOOLS.find((tool) => tool.key === rightTool)?.label ?? "Tools"}
+              </h3>
+              <Button variant="ghost" size="sm" className="lg:hidden" onClick={() => setRightOpen(false)}>
+                <IconClose className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {!rightTool ? (
+                <ul className="space-y-1">
+                  {TOOLS.map((tool) => {
+                    const Icon = tool.icon;
+                    return (
+                      <li key={tool.key}>
+                        <button
+                          onClick={() => setRightTool(tool.key)}
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                          {tool.label}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <>
+                  {rightTool === "assistant" && (
+                    <AssistantPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                      onApplyEdit={(content) => setEditorContent(content)}
+                    />
+                  )}
+                  {rightTool === "proofreader" && (
+                    <ProofreaderPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                  {rightTool === "images" && (
+                    <ImagesPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                      onInsertImage={(markdown) => insertMarkdownRef.current?.(markdown)}
+                    />
+                  )}
+                  {rightTool === "cover" && (
+                    <CoverPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                  {rightTool === "marketing" && (
+                    <MarketingPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                  {rightTool === "translation" && (
+                    <TranslationPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                  {rightTool === "validator" && (
+                    <ValidatorPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                  {rightTool === "export" && (
+                    <ExportPanel
+                      projectId={projectId}
+                      writingBookId={writingBookId ?? ""}
+                      activeChapterId={activeChapterId}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          </aside>
+        ) : null}
       </div>
 
-      {/* ========== RIGHT TOOLS PANEL ========== */}
-      {rightOpen && (
-        <div className="flex h-full w-60 flex-shrink-0 flex-col border-l border-border bg-card">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-            <h3 className="text-sm font-semibold">{rightTool ? (TOOLS.find(t => t.key === rightTool)?.label ?? "Tools") : "Tools"}</h3>
-            <Button variant="ghost" size="sm" onClick={() => { setRightTool(null); setRightOpen(false); }}><IconChevronRight className="h-3.5 w-3.5" /></Button>
+      {/* ===== Floating generation progress ===== */}
+      {activeJobId ? (
+        <ProgressPanel
+          projectId={projectId}
+          jobId={activeJobId}
+          onDone={onGenerationDone}
+          onDismiss={() => {
+            setActiveJobId(null);
+            router.replace(`/workspace/${projectId}`);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarks tab
+// ---------------------------------------------------------------------------
+function BookmarksTab({
+  projectId,
+  activeChapter,
+  onSelectChapter,
+}: {
+  projectId: string;
+  activeChapter: { id: string; title: string } | null;
+  onSelectChapter: (chapterId: string) => Promise<void>;
+}) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const { data: bookmarks = [], isLoading } = useQuery({
+    queryKey: ["bookmarks", projectId],
+    queryFn: () => studioApi.listBookmarks(projectId),
+  });
+
+  const add = async () => {
+    if (!activeChapter) {
+      toast({ title: "Select a chapter first", variant: "info" });
+      return;
+    }
+    try {
+      await studioApi.createBookmark(projectId, {
+        chapter_id: activeChapter.id,
+        title: activeChapter.title,
+        note: "Bookmarked from the workspace",
+      });
+      toast({ title: "Bookmark added", variant: "success" });
+      void queryClient.invalidateQueries({ queryKey: ["bookmarks", projectId] });
+    } catch (error) {
+      toast(toastError(error));
+    }
+  };
+
+  const remove = async (bookmarkId: string) => {
+    try {
+      await studioApi.deleteBookmark(bookmarkId);
+      void queryClient.invalidateQueries({ queryKey: ["bookmarks", projectId] });
+    } catch (error) {
+      toast(toastError(error));
+    }
+  };
+
+  if (isLoading) return <Spinner label="Loading bookmarks…" />;
+
+  return (
+    <div className="space-y-2">
+      <Button size="sm" className="w-full" onClick={() => void add()}>
+        <IconBook className="mr-1 h-3.5 w-3.5" /> Bookmark this chapter
+      </Button>
+      {bookmarks.length === 0 ? (
+        <p className="p-3 text-xs text-muted-foreground">
+          No bookmarks yet — pin chapters you want to revisit.
+        </p>
+      ) : (
+        bookmarks.map((bookmark) => (
+          <div key={bookmark.id} className="rounded-lg border border-border p-2">
+            <button
+              className="block w-full text-left text-xs font-medium text-foreground hover:text-primary"
+              onClick={() => bookmark.chapter_id && void onSelectChapter(bookmark.chapter_id)}
+            >
+              {bookmark.title}
+            </button>
+            {bookmark.note ? (
+              <p className="mt-0.5 text-[11px] text-muted-foreground">{bookmark.note}</p>
+            ) : null}
+            <button
+              className="mt-1 text-[10px] text-muted-foreground hover:text-destructive"
+              onClick={() => void remove(bookmark.id)}
+            >
+              Remove
+            </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {!rightTool ? (
-              TOOLS.map(t => { const Icon = t.icon; return (
-                <button key={t.key} onClick={() => setRightTool(t.key)} className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground"><Icon className="h-3.5 w-3.5" />{t.label}</button>
-              );})
-            ) : (
-              <>
-                {rightTool === "export" && <ExportPanel bookId={writingBookId} />}
-                {rightTool === "images" && <ImagesPanel />}
-                {rightTool === "cover" && <CoverPanel bookId={writingBookId} />}
-                {rightTool === "validator" && <KdpPanel bookId={writingBookId} />}
-                {rightTool === "proofread" && <ProofreadPanel chapterId={activeChapterId} />}
-                {rightTool === "translate" && <TranslatePanel bookId={writingBookId} />}
-                {rightTool === "marketing" && <MarketingPanel bookId={writingBookId} />}
-                <div className="pt-2 border-t border-border">
-                  <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setRightTool(null)}>← Back to all tools</button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+        ))
       )}
-      {!rightOpen && (
-        <Button variant="outline" size="sm" className="shrink-0 self-start mt-10 rounded-l-md h-8" onClick={() => setRightOpen(true)}><IconChevronRight className="h-3.5 w-3.5" /></Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Versions tab (restore points)
+// ---------------------------------------------------------------------------
+function VersionsTab({ projectId, refreshSignal }: { projectId: string; refreshSignal: number }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [label, setLabel] = useState("");
+
+  const { data: versions = [], isLoading } = useQuery({
+    queryKey: ["versions", projectId, refreshSignal],
+    queryFn: () => studioApi.listVersions(projectId),
+  });
+
+  const saveVersion = async () => {
+    const trimmed = label.trim();
+    if (!trimmed) {
+      toast({ title: "Give the version a name", variant: "info" });
+      return;
+    }
+    try {
+      await studioApi.createVersion(projectId, trimmed, "Manual restore point");
+      setLabel("");
+      toast({ title: "Version saved", variant: "success" });
+      void queryClient.invalidateQueries({ queryKey: ["versions", projectId] });
+    } catch (error) {
+      toast(toastError(error));
+    }
+  };
+
+  const restore = async (versionId: string, versionLabel: string) => {
+    if (!window.confirm(`Restore "${versionLabel}"? A safety snapshot of the current state will be saved first.`)) {
+      return;
+    }
+    try {
+      const result = await studioApi.restoreVersion(versionId);
+      toast({ title: result.message, variant: "success" });
+      void queryClient.invalidateQueries({ queryKey: ["versions", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["writing-chapters", projectId] });
+    } catch (error) {
+      toast(toastError(error));
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-1">
+        <input
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          placeholder="Version name (e.g. Before proofread)"
+          className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus:border-ring"
+        />
+        <Button size="sm" onClick={() => void saveVersion()}>
+          Save
+        </Button>
+      </div>
+      {isLoading ? (
+        <Spinner label="Loading versions…" />
+      ) : versions.length === 0 ? (
+        <p className="p-3 text-xs text-muted-foreground">
+          Restore points are created automatically after generation, proofreading,
+          formatting, and translation — and you can save one anytime.
+        </p>
+      ) : (
+        versions.map((version) => (
+          <div key={version.id} className="rounded-lg border border-border p-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="flex items-center gap-1 text-xs font-medium text-foreground">
+                  <IconHistory className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{version.label}</span>
+                </p>
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  {version.created_by === "auto" ? "Automatic · " : ""}
+                  {new Date(version.created_at).toLocaleString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </p>
+              </div>
+              <button
+                onClick={() => void restore(version.id, version.label)}
+                className="shrink-0 text-[10px] font-medium text-primary hover:underline"
+              >
+                Restore
+              </button>
+            </div>
+          </div>
+        ))
       )}
     </div>
   );

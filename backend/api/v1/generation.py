@@ -37,6 +37,63 @@ def _check_ambiguities(setup: BookSetupRequest) -> list[dict[str, str]]:
             "question": "Any special instructions for the AI? For example: avoid jargon, write for beginners, include examples.",
             "placeholder": "Avoid jargon, use UK English, include Bible verses, etc.",
         })
+
+    # Word count vs chapter count mismatch.
+    if setup.size.chapters_override:
+        words_per_chapter = setup.size.total_word_count // setup.size.chapters_override
+        if words_per_chapter < 400:
+            questions.append({
+                "id": "chapter_count",
+                "question": (
+                    f"The requested word count ({setup.size.total_word_count:,} words) doesn't "
+                    f"match the requested chapter count ({setup.size.chapters_override} chapters) - "
+                    f"that is only ~{words_per_chapter} words per chapter, which is too short for "
+                    "a readable chapter. Lower the chapter count or raise the word count."
+                ),
+                "placeholder": "e.g. 8 chapters, or 20,000 words",
+            })
+        elif words_per_chapter > 4000:
+            questions.append({
+                "id": "chapter_count",
+                "question": (
+                    f"{setup.size.chapters_override} chapters for {setup.size.total_word_count:,} words "
+                    f"means ~{words_per_chapter:,} words per chapter - unusually long. Consider more "
+                    "chapters so each one stays focused."
+                ),
+                "placeholder": "e.g. 14 chapters instead",
+            })
+
+    # Audience vs reading level mismatch.
+    audience_text = (setup.details.target_audience or "").lower()
+    reading_level = setup.ai.reading_level
+    beginner_hints = ("beginner", "starter", "new to", "novice", "kids", "children", "first-time")
+    advanced_hints = ("expert", "advanced", "professional", "engineer", "developer", "veteran")
+    if reading_level == "basic" and any(hint in audience_text for hint in advanced_hints):
+        questions.append({
+            "id": "reading_level",
+            "question": (
+                "You selected a basic reading level, but the target audience sounds advanced. "
+                "Should the explanations stay simple, or should I assume prior knowledge?"
+            ),
+            "placeholder": "e.g. Keep it simple; explain every term",
+        })
+    elif reading_level == "advanced" and any(hint in audience_text for hint in beginner_hints):
+        questions.append({
+            "id": "reading_level",
+            "question": (
+                "You selected an advanced reading level, but the target audience sounds like "
+                "beginners. Should I still assume deep prior knowledge?"
+            ),
+            "placeholder": "e.g. Explain fundamentals first, then go deep",
+        })
+
+    # No book purpose -> ask so the AI can focus the whole book.
+    if not (setup.details.book_purpose or "").strip():
+        questions.append({
+            "id": "book_purpose",
+            "question": "What should this book achieve for the reader? A clear purpose shapes every chapter.",
+            "placeholder": "e.g. Help readers launch a side business in 90 days",
+        })
     return questions
 
 

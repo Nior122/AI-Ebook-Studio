@@ -113,7 +113,10 @@ class ProviderRegistry:
         application keeps running with only the providers it has credentials for.
         """
         settings = settings or get_settings()
+        from providers.ai.local_provider import LocalProvider
+
         builders: dict[str, Callable[[], AIProvider | None]] = {
+            "local": lambda: LocalProvider(),
             "openai": lambda: OpenAIProvider(api_key=settings.openai_api_key),
             "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
             "gemini": lambda: GeminiProvider(api_key=settings.resolved_google_api_key),
