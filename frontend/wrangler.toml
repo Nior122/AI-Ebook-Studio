@@ -1,27 +1,24 @@
-# Cloudflare configuration for the Next.js frontend.
+# Cloudflare configuration for the Next.js frontend (Workers Builds route).
 #
-# Uses @opennextjs/cloudflare (the official Next.js adapter for Cloudflare).
+# This app deploys through @opennextjs/cloudflare:
+#   - `npm run build`  -> runs `opennextjs-cloudflare build`, producing the
+#                         worker bundle at .open-next/worker.js
+#   - `wrangler deploy`-> uploads that bundle as the "ai-ebook-studio" worker
 #
-# Two ways to deploy:
+# Cloudflare dashboard (Workers & Pages -> Workers -> Workers Builds,
+# connected to GitHub):
+#   Project name:        ai-ebook-studio
+#   Root directory:      frontend     <-- important: this file lives there
+#   Build command:       npm run build
+#   Deploy command:      npx wrangler deploy
+#   Production branch:   master       <-- the repo's default branch is master
 #
-# A) Cloudflare Pages (Git integration) — recommended:
-#    1. In the Cloudflare dashboard: Workers & Pages -> Create -> Pages ->
-#       Connect to Git -> pick this repo.
-#    2. Framework preset: "Next.js"; build command: `npm run build`;
-#       build output directory: `.open-next` (matches pages_build_output_dir).
-#    3. Add the environment variables from .env.example (the NEXT_PUBLIC_*
-#       ones) in Settings -> Environment variables.
-#
-# B) Workers deploy from your machine / CI:
-#    cd frontend && npm run deploy
-#    (requires CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)
-#
-# Note: Clerk auth works on Cloudflare Pages; the middleware runs on the
-# Workers runtime (see docs/Deployment_Guide.md for the required env vars).
+# Environment variables (add under Settings -> Variables & Secrets):
+#   NEXT_PUBLIC_API_BASE_URL            -> https://<backend>.onrender.com/api/v1
+#   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+#   CLERK_SECRET_KEY
 
 name = "ai-ebook-studio"
+main = ".open-next/worker.js"
 compatibility_date = "2026-07-01"
-pages_build_output_dir = ".open-next"
-
-# Uncomment for a Workers-style deploy with a custom zone/route:
-# workers_dev = true
+compatibility_flags = ["nodejs_compat"]
