@@ -234,12 +234,29 @@ async def test_in_memory_job_queue_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_jobs_endpoint_returns_404_for_unknown_job() -> None:
-    """The jobs endpoint returns the standard error envelope for unknown ids."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(f"/api/v1/jobs/{uuid.uuid4()}")
+async def test_jobs_endpoint_returns_404_for_unknown_job(client: AsyncClient) -> None:
+    """The jobs endpoint returns the standard error envelope for unknown ids.
 
+    Since the hardening pass, job endpoints require authentication and are
+    scoped to the caller; unknown ids still surface as RESOURCE_NOT_FOUND.
+    """
+    registered = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": f"phase2-{uuid.uuid4().hex[:8]}@test.dev",
+            "password": "SecurePass123",
+            "display_name": "Phase 2 QA",
+        },
+    )
+    assert registered.status_code in (200, 201), registered.text
+    token = registered.json()["tokens"]["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Unauthenticated access is rejected before any lookup happens.
+    anon = await client.get(f"/api/v1/jobs/{uuid.uuid4()}")
+    assert anon.status_code == 401
+
+    response = await client.get(f"/api/v1/jobs/{uuid.uuid4()}", headers=headers)
     assert response.status_code == 404
     payload = response.json()
     assert payload["success"] is False

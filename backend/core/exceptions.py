@@ -115,9 +115,12 @@ def error_response(code: str, message: str, details: object | None = None) -> di
 
     Shape: ``{"success": false, "error": {"code", "message", "details"}}``.
     """
+    from middleware.request_id import get_request_id
+
     return {
         "success": False,
         "error": {"code": code, "message": message, "details": details or {}},
+        "request_id": get_request_id(),
     }
 
 
@@ -204,7 +207,7 @@ async def database_exception_handler(request: Request, exc: SQLAlchemyError) -> 
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=error_response(
             code="DATABASE_ERROR",
-            message="A database error occurred.",
+            message="The database is temporarily unavailable. Please try again in a moment.",
         ),
     )
 
@@ -232,7 +235,7 @@ async def unexpected_exception_handler(request: Request, exc: Exception) -> JSON
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=error_response(
             code="INTERNAL_ERROR",
-            message="An unexpected error occurred.",
+            message="Something went wrong on our side. Please try again — your work is auto-saved.",
         ),
     )
 

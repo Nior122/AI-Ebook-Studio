@@ -13,6 +13,8 @@ from core.exceptions import register_exception_handlers
 from core.logging import configure_logging
 from middleware.request_logging import RequestLoggingMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
+from middleware.body_limit import BodyLimitMiddleware
+from middleware.request_id import RequestIdMiddleware
 
 
 @asynccontextmanager
@@ -26,6 +28,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from services.jobs.handlers import register_all_handlers
 
     register_all_handlers()
+
+    # Recover jobs orphaned by a previous process (crash/restart).
+    from database.session import AsyncSessionLocal
+    from services.jobs.runner import recover_stale_jobs
+
+    async with AsyncSessionLocal() as session:
+        recovered = await recover_stale_jobs(session)
+    if recovered:
+        logger.info("stale_jobs_recovered", count=recovered)
+
     logger.info("job_handlers_registered")
 
     yield
@@ -64,6 +76,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Accept", "Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"],
+    )
+    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=resolved_settings.max_request_body_mb * 1024 * 1024,
     )
 
     register_exception_handlers(app)

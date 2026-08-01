@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # --- Security / rate limiting ---
     rate_limit_enabled: bool = True
 
+    # --- Request limits ---
+    max_request_body_mb: int = 20
+
     # --- Token lifetimes ---
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30

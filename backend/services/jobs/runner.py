@@ -310,3 +310,28 @@ async def enqueue_and_schedule(
     handle = await get_job_queue().enqueue(job_type, payload or {})
     asyncio.create_task(run_job(handle))
     return handle
+
+
+async def recover_stale_jobs(session: AsyncSession) -> int:
+    """Mark jobs left in a non-terminal state by a previous process as failed.
+
+    Called at application startup: any PENDING/QUEUED/RUNNING job that did not
+    finish before the process died is transitioned to FAILED with an actionable
+    message, so users can retry instead of waiting forever on a ghost job.
+    """
+    from sqlalchemy import update as sa_update
+
+    stale = [JobStatus.PENDING.value, JobStatus.QUEUED.value, JobStatus.RUNNING.value]
+    result = await session.execute(
+        sa_update(Job)
+        .where(Job.status.in_(stale))
+        .values(
+            status=JobStatus.FAILED.value,
+            error_message=(
+                "Interrupted by server restart. "
+                "Please retry the operation from the workspace."
+            ),
+        )
+    )
+    await session.commit()
+    return int(result.rowcount or 0)

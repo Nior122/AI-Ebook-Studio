@@ -44,16 +44,26 @@ import { NotificationCenter } from "@/components/studio/notification-center";
 import { StageBadge } from "@/components/studio/stage-badge";
 import { ActivityTimeline } from "@/components/studio/activity-timeline";
 import { SearchBox } from "@/components/studio/search-box";
-import {
-  AssistantPanel,
-  ExportPanel,
-  ImagesPanel,
-  CoverPanel,
-  ValidatorPanel,
-  ProofreaderPanel,
-  TranslationPanel,
-  MarketingPanel,
-} from "@/components/studio/panels";
+import dynamic from "next/dynamic";
+
+// Right-panel tools are only needed when the workspace is open — load them
+// lazily so the dashboard and wizard stay light.
+const loadPanel = () => import("@/components/studio/panels");
+function PanelFallback() {
+  return (
+    <div className="flex justify-center p-6">
+      <Spinner className="h-4 w-4" />
+    </div>
+  );
+}
+const AssistantPanel = dynamic(() => loadPanel().then((m) => m.AssistantPanel), { ssr: false, loading: PanelFallback });
+const ExportPanel = dynamic(() => loadPanel().then((m) => m.ExportPanel), { ssr: false, loading: PanelFallback });
+const ImagesPanel = dynamic(() => loadPanel().then((m) => m.ImagesPanel), { ssr: false, loading: PanelFallback });
+const CoverPanel = dynamic(() => loadPanel().then((m) => m.CoverPanel), { ssr: false, loading: PanelFallback });
+const ValidatorPanel = dynamic(() => loadPanel().then((m) => m.ValidatorPanel), { ssr: false, loading: PanelFallback });
+const ProofreaderPanel = dynamic(() => loadPanel().then((m) => m.ProofreaderPanel), { ssr: false, loading: PanelFallback });
+const TranslationPanel = dynamic(() => loadPanel().then((m) => m.TranslationPanel), { ssr: false, loading: PanelFallback });
+const MarketingPanel = dynamic(() => loadPanel().then((m) => m.MarketingPanel), { ssr: false, loading: PanelFallback });
 
 type LeftTab = "chapters" | "outline" | "bookmarks" | "versions" | "activity";
 

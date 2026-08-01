@@ -1,6 +1,9 @@
 """Static verification for the frontend: parse every .ts/.tsx with tree-sitter
 and report syntax errors; then check that every component/hook is imported
 somewhere (no orphan files), and every page under app/ is a route entry.
+
+Static imports and dynamic imports (next/dynamic + import(\"...\")) are both
+wired into the reachability graph.
 """
 import os
 import re
@@ -17,6 +20,9 @@ ROOT = "/home/user/repos/AI-Ebook-Studio/frontend"
 parser_tsx = Parser(TSX)
 parser_ts = Parser(TS)
 
+# Matches `from "x"`, `import "x"` (side-effect), and dynamic `import("x")`.
+IMPORT_RE = re.compile(r'from\s+["\']([^"\']+)["\']|import\(\s*["\']([^"\']+)["\']\s*\)')
+
 
 def parse_file(path):
     source = open(path, "rb").read()
@@ -30,6 +36,42 @@ def parse_file(path):
             errors.append((node.start_point, node.type, source[node.start_byte:node.end_byte][:60]))
         stack.extend(node.children)
     return errors
+
+
+def resolve_spec(path, spec):
+    """Resolve a module specifier (relative or @/ alias) to a file path."""
+    if spec.startswith("."):
+        base = os.path.dirname(path)
+        candidate = os.path.normpath(os.path.join(base, spec))
+        if os.path.exists(candidate):
+            return candidate
+        for ext in (".tsx", ".ts", "/index.tsx", "/index.ts"):
+            if os.path.exists(candidate + ext):
+                return candidate + ext
+        return candidate
+    if spec.startswith("@/"):
+        candidate = os.path.normpath(os.path.join(ROOT, spec[2:]))
+        if os.path.isfile(candidate):
+            return candidate
+        for ext in (".tsx", ".ts"):
+            if os.path.isfile(candidate + ext):
+                return candidate + ext
+        for index in ("/index.tsx", "/index.ts"):
+            if os.path.isfile(candidate + index):
+                return candidate + index
+        return candidate
+    return None
+
+
+def imports_of(path):
+    source = open(path, encoding="utf-8").read()
+    found = set()
+    for match in IMPORT_RE.finditer(source):
+        spec = match.group(1) or match.group(2)
+        resolved = resolve_spec(path, spec)
+        if resolved:
+            found.add(os.path.normpath(resolved))
+    return found
 
 
 def main():
@@ -61,41 +103,6 @@ def main():
         print("✓ All files parse cleanly")
 
     # ---- import wiring scan ----
-    # Build the import graph: file -> set of imported module specifiers (relative or alias).
-    def imports_of(path):
-        source = open(path, encoding="utf-8").read()
-        found = set()
-        for match in re.finditer(r"from\s+[\"']([^\"']+)[\"']", source):
-            spec = match.group(1)
-            if spec.startswith("."):
-                base = os.path.dirname(path)
-                if spec.endswith(".tsx") or spec.endswith(".ts"):
-                    candidate = os.path.normpath(os.path.join(base, spec))
-                else:
-                    candidate = os.path.normpath(os.path.join(base, spec))
-                    for ext in (".tsx", ".ts", "/index.tsx", "/index.ts"):
-                        if os.path.exists(candidate + ext):
-                            candidate = candidate + ext
-                            break
-                found.add(os.path.normpath(candidate))
-            elif spec.startswith("@/"):
-                candidate = os.path.normpath(os.path.join(ROOT, spec[2:]))
-                resolved = candidate
-                if os.path.isfile(candidate):
-                    resolved = candidate
-                else:
-                    for ext in (".tsx", ".ts"):
-                        if os.path.isfile(candidate + ext):
-                            resolved = candidate + ext
-                            break
-                    else:
-                        for index in ("/index.tsx", "/index.ts"):
-                            if os.path.isfile(candidate + index):
-                                resolved = candidate + index
-                                break
-                found.add(resolved)
-        return found
-
     graph = {}
     for path in files:
         graph[path] = imports_of(path)

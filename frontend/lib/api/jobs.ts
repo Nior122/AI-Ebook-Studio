@@ -29,15 +29,7 @@ export interface JobResponse {
   updated_at: string;
 }
 
-export interface StartJobRequest {
-  job_type: JobType;
-  payload?: Record<string, unknown>;
-}
-
 export const jobsApi = {
-  start(payload: StartJobRequest) {
-    return apiClient.post<JobResponse>("/jobs", payload);
-  },
   get(jobId: string) {
     return apiClient.get<JobResponse>(`/jobs/${jobId}`);
   },

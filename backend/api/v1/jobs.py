@@ -14,8 +14,7 @@ from core.exceptions import ResourceNotFoundError
 from api.dependencies import CurrentUser, DatabaseSession
 from models.operations import Job
 from sqlalchemy import select
-from schemas.jobs import JobCreateRequest, JobResponse
-from services.jobs import enqueue_and_schedule
+from schemas.jobs import JobResponse
 from services.jobs.enums import JobStatus, JobType
 from services.jobs.queue import JobQueueProtocol, get_job_queue
 
@@ -70,54 +69,59 @@ async def list_jobs(
 
 
 @router.get("/{job_id}", response_model=JobResponse, summary="Get job status")
-async def get_job(job_id: UUID) -> JobResponse:
-    """Return the current status of a job by id."""
+async def get_job(job_id: UUID, session: DatabaseSession, user: CurrentUser) -> JobResponse:
+    """Return the current status of a job by id (scoped to the caller).
+
+    Falls back to the persisted job row when the in-memory queue no longer
+    holds the job (e.g. after a server restart), so progress survives restarts.
+    """
     handle = await _queue().get(job_id)
-    if handle is None:
+    if handle is not None:
+        owner = handle.payload.get("user_id")
+        if owner is None or UUID(str(owner)) != user.id:
+            raise ResourceNotFoundError(f"Job '{job_id}' was not found.")
+        return JobResponse(
+            id=handle.id,
+            job_type=handle.job_type,
+            status=handle.status,
+            progress=handle.progress,
+            current_step=handle.current_step,
+            result=handle.result,
+            error_message=handle.error_message,
+            created_at=handle.created_at,
+            updated_at=handle.updated_at,
+        )
+
+    result = await session.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if job is None or job.user_id is None or job.user_id != user.id:
         raise ResourceNotFoundError(f"Job '{job_id}' was not found.")
     return JobResponse(
-        id=handle.id,
-        job_type=handle.job_type,
-        status=handle.status,
-        progress=handle.progress,
-        current_step=handle.current_step,
-        result=handle.result,
-        error_message=handle.error_message,
-        created_at=handle.created_at,
-        updated_at=handle.updated_at,
-    )
-
-
-@router.post(
-    "",
-    response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Enqueue and run a job",
-)
-async def create_job(payload: JobCreateRequest) -> JobResponse:
-    """Enqueue a job and immediately schedule it for background execution.
-
-    The caller polls ``GET /api/v1/jobs/{job_id}`` (using the returned ``id``)
-    to track progress. The handler for ``job_type`` must be registered on
-    application startup.
-    """
-    handle = await enqueue_and_schedule(payload.job_type, payload.payload)
-    return JobResponse(
-        id=handle.id,
-        job_type=handle.job_type,
-        status=JobStatus.QUEUED,
-        progress=0,
-        current_step=None,
-        result=None,
-        error_message=None,
-        created_at=handle.created_at,
-        updated_at=handle.updated_at,
+        id=job.id,
+        job_type=JobType(job.job_type),
+        status=JobStatus(job.status),
+        progress=job.progress or 0,
+        current_step=job.current_step,
+        result=job.result_data or job.result,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
     )
 
 
 @router.post("/{job_id}/cancel", summary="Cancel a job")
-async def cancel_job(job_id: UUID) -> dict[str, object]:
-    """Attempt to cancel a non-terminal job."""
+async def cancel_job(job_id: UUID, session: DatabaseSession, user: CurrentUser) -> dict[str, object]:
+    """Attempt to cancel a non-terminal job owned by the caller."""
+    handle = await _queue().get(job_id)
+    if handle is not None:
+        owner = handle.payload.get("user_id")
+        if owner is None or UUID(str(owner)) != user.id:
+            raise ResourceNotFoundError(f"Job '{job_id}' was not found.")
+    else:
+        result = await session.execute(select(Job).where(Job.id == job_id))
+        job = result.scalar_one_or_none()
+        if job is None or job.user_id is None or job.user_id != user.id:
+            raise ResourceNotFoundError(f"Job '{job_id}' was not found.")
     cancelled = await _queue().cancel(job_id)
     if not cancelled:
         raise ResourceNotFoundError(

@@ -141,6 +141,8 @@ export function ImagesPanel({ projectId, activeChapterId, onInsertImage }: Panel
                   <img
                     src={img.file_url}
                     alt={img.prompt}
+                    loading="lazy"
+                    decoding="async"
                     className="h-24 w-full object-cover"
                   />
                 ) : (
