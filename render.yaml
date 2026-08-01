@@ -74,7 +74,7 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: AI_DEFAULT_PROVIDER
-        value: openai
+        value: openrouter
       - key: AI_DEFAULT_MODEL
         value: openai/gpt-4o-mini
       - key: AI_FALLBACK_ENABLED
