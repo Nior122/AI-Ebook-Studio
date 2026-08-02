@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "opennextjs-cloudflare build",
-    "build:local": "next build",
+    "build:next": "next build",
     "preview": "opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types",
@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
-    "@opennextjs/cloudflare": "^1.0.0",
+    "@opennextjs/cloudflare": "^1.20.2",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.2",
@@ -45,6 +45,6 @@
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
     "vitest-dom": "^0.1.1",
-    "wrangler": "^3.99.0"
+    "wrangler": "^4.118.0"
   }
 }

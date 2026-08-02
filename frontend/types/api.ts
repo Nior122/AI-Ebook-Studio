@@ -337,7 +337,7 @@ export interface WritingChapterOutlineSection {
 
 export type ChapterStatus =
   | "planned" | "outlining" | "generating" | "draft"
-  | "editing" | "approved" | "needs_revision";
+  | "editing" | "approved" | "needs_revision" | "failed";
 
 export interface WritingChapter {
   id: string;

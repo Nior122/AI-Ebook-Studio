@@ -139,7 +139,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ projectId:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChapterId]);
 
-  const autosave = useAutosave(projectId, activeChapterId, editorContent);
+  const autosave = useAutosave(projectId, activeChapterId ?? undefined, editorContent);
 
   const selectChapter = useCallback(
     async (chapterId: string) => {

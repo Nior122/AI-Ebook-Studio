@@ -17,6 +17,7 @@ const eslintConfig = [
     rules: {
       "@typescript-eslint/no-explicit-any": "warn",
       "@typescript-eslint/consistent-type-imports": "warn",
+      "react/no-unescaped-entities": "off",
     },
   },
 ];

@@ -74,7 +74,7 @@ export function RichEditor({ value, onChange, disabled, placeholder, insertMarkd
         if (!editor) return;
         editor.focus();
         const html = mdToHtml(markdown).trim();
-        if (window.getSelection && editor.contains(document.activeElement)) {
+        if (typeof window.getSelection === "function" && editor.contains(document.activeElement)) {
           document.execCommand("insertHTML", false, html);
         } else {
           editor.innerHTML += html;

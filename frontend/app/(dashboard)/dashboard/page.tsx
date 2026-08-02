@@ -95,8 +95,8 @@ export default function DashboardPage() {
       ) : isError ? (
         <ErrorState
           title="Couldn't load your books"
-          description="The backend may be offline. Try again in a moment."
-          action={{ label: "Retry", onClick: () => void refetch() }}
+          message="The backend may be offline. Try again in a moment."
+          onRetry={() => void refetch()}
         />
       ) : filtered.length === 0 ? (
         <EmptyState

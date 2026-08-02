@@ -28,7 +28,7 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       const inPlainField =
-        tag === "input" || tag === "textarea" || (tag === "select" ?? false);
+        tag === "input" || tag === "textarea" || tag === "select";
 
       if (event.key.toLowerCase() === "s") {
         event.preventDefault();
