@@ -23,77 +23,35 @@ router = APIRouter(prefix="/generation", tags=["generation"])
 
 
 def _check_ambiguities(setup: BookSetupRequest) -> list[dict[str, str]]:
-    """Check for obvious missing information before AI analysis."""
+    """Only flag truly blocking issues. Never let users get stuck in a loop.
+
+    Hard blocks:
+    - Chapter count vs word count is physically impossible (< 300 words/chap).
+    - Topic is empty (nothing to write about).
+    """
     questions: list[dict[str, str]] = []
-    if not setup.details.topic or len(setup.details.topic.strip()) < 10:
+
+    if not setup.details.topic or len(setup.details.topic.strip()) < 5:
         questions.append({
             "id": "topic",
-            "question": "What topic would you like the book to cover? Please be more specific.",
-            "placeholder": "e.g. Morning routines for sustainable productivity",
-        })
-    if not setup.special_instructions.instructions.strip():
-        questions.append({
-            "id": "instructions",
-            "question": "Any special instructions for the AI? For example: avoid jargon, write for beginners, include examples.",
-            "placeholder": "Avoid jargon, use UK English, include Bible verses, etc.",
+            "question": "What topic would you like the book to cover? Please be a little more specific.",
+            "placeholder": "e.g., Morning routines for sustainable productivity",
         })
 
-    # Word count vs chapter count mismatch.
     if setup.size.chapters_override:
         words_per_chapter = setup.size.total_word_count // setup.size.chapters_override
-        if words_per_chapter < 400:
+        if words_per_chapter < 300:
             questions.append({
                 "id": "chapter_count",
                 "question": (
-                    f"The requested word count ({setup.size.total_word_count:,} words) doesn't "
-                    f"match the requested chapter count ({setup.size.chapters_override} chapters) - "
-                    f"that is only ~{words_per_chapter} words per chapter, which is too short for "
-                    "a readable chapter. Lower the chapter count or raise the word count."
+                    f"The requested word count ({setup.size.total_word_count:,} words) "
+                    f"is impossible with {setup.size.chapters_override} chapters - "
+                    f"that is only ~{words_per_chapter} words per chapter. "
+                    "Lower the chapter count or raise the word count."
                 ),
-                "placeholder": "e.g. 8 chapters, or 20,000 words",
-            })
-        elif words_per_chapter > 4000:
-            questions.append({
-                "id": "chapter_count",
-                "question": (
-                    f"{setup.size.chapters_override} chapters for {setup.size.total_word_count:,} words "
-                    f"means ~{words_per_chapter:,} words per chapter - unusually long. Consider more "
-                    "chapters so each one stays focused."
-                ),
-                "placeholder": "e.g. 14 chapters instead",
+                "placeholder": "e.g., 8 chapters or 20,000 words",
             })
 
-    # Audience vs reading level mismatch.
-    audience_text = (setup.details.target_audience or "").lower()
-    reading_level = setup.ai.reading_level
-    beginner_hints = ("beginner", "starter", "new to", "novice", "kids", "children", "first-time")
-    advanced_hints = ("expert", "advanced", "professional", "engineer", "developer", "veteran")
-    if reading_level == "basic" and any(hint in audience_text for hint in advanced_hints):
-        questions.append({
-            "id": "reading_level",
-            "question": (
-                "You selected a basic reading level, but the target audience sounds advanced. "
-                "Should the explanations stay simple, or should I assume prior knowledge?"
-            ),
-            "placeholder": "e.g. Keep it simple; explain every term",
-        })
-    elif reading_level == "advanced" and any(hint in audience_text for hint in beginner_hints):
-        questions.append({
-            "id": "reading_level",
-            "question": (
-                "You selected an advanced reading level, but the target audience sounds like "
-                "beginners. Should I still assume deep prior knowledge?"
-            ),
-            "placeholder": "e.g. Explain fundamentals first, then go deep",
-        })
-
-    # No book purpose -> ask so the AI can focus the whole book.
-    if not (setup.details.book_purpose or "").strip():
-        questions.append({
-            "id": "book_purpose",
-            "question": "What should this book achieve for the reader? A clear purpose shapes every chapter.",
-            "placeholder": "e.g. Help readers launch a side business in 90 days",
-        })
     return questions
 
 
