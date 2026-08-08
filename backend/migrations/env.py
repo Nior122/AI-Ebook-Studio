@@ -45,10 +45,18 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_migrations_online() -> None:
     """Run migrations in online mode."""
     configuration = config.get_section(config.config_ini_section, {})
+    connect_args: dict = {}
+    url = configuration.get("sqlalchemy.url", "")
+    if url.startswith("postgresql"):
+        from database.session import _clean_database_url
+
+        cleaned, connect_args = _clean_database_url(url)
+        configuration["sqlalchemy.url"] = cleaned
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     async with connectable.connect() as connection:
