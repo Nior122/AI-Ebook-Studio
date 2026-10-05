@@ -77,14 +77,32 @@ class WritingBook(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     # --- Workflow state ---
     # Possible statuses:
-    #   draft | planning | outlining | writing | editing
-    #   | ready_for_formatting | completed
+    #   draft | planning | outlining | generating | validating
+    #   | revision_required | review | approved | ready_for_formatting
+    #   | completed | failed
     status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     # current_step roughly maps to: idea | brief | blueprint | outline | writing
     #   | editing | formatting | export
     current_step: Mapped[str] = mapped_column(String(40), default="idea", nullable=False)
 
+    # --- Word-count management (Phase 6 repair) ---
+    target_word_count: Mapped[int | None] = mapped_column(Integer)
+    min_word_count: Mapped[int | None] = mapped_column(Integer)
+    max_word_count: Mapped[int | None] = mapped_column(Integer)
+    actual_word_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # --- Generation bookkeeping (Phase 6 repair) ---
+    # Id of the background job currently/last driving generation for this book.
+    generation_job_id: Mapped[UUID | None] = mapped_column(GUID())
+    # Structured progress snapshot: stage, chapter progress, validation summary.
+    generation_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # Book-level quality report produced by the final validation pass.
+    quality_report: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
     # --- Relationships ---
+    specification: Mapped[BookSpecification | None] = relationship(
+        back_populates="book", cascade="all, delete-orphan", uselist=False
+    )
     brief: Mapped[BookBrief | None] = relationship(
         back_populates="book", cascade="all, delete-orphan", uselist=False
     )
@@ -107,6 +125,64 @@ class WritingBook(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+# ---------------------------------------------------------------------------
+# Book Specification (TOPIC LOCK)
+# ---------------------------------------------------------------------------
+class BookSpecification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The locked, canonical definition of what the book is about.
+
+    Created at the start of generation and passed (in full) to *every* AI
+    request in the pipeline. This is the "topic lock": chapter generation,
+    validation, and revision all measure against this specification so the
+    manuscript cannot drift off-topic.
+    """
+
+    __tablename__ = "bw_book_specifications"
+    __table_args__ = (
+        UniqueConstraint("book_id", name="uq_bw_book_specifications_book_id"),
+        Index("ix_bw_book_specifications_book_id", "book_id"),
+    )
+
+    book_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("bw_books.id"), nullable=False, unique=True
+    )
+
+    # --- Identity ---
+    book_title: Mapped[str] = mapped_column(String(300), nullable=False)
+    subtitle: Mapped[str | None] = mapped_column(String(300))
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    author_name: Mapped[str | None] = mapped_column(String(220))
+
+    # --- Audience & promise ---
+    target_audience: Mapped[str | None] = mapped_column(Text)
+    book_type: Mapped[str | None] = mapped_column(String(80))
+    language: Mapped[str] = mapped_column(String(20), default="en", nullable=False)
+    tone: Mapped[str | None] = mapped_column(String(160))
+    main_promise: Mapped[str | None] = mapped_column(Text)
+    reader_problem: Mapped[str | None] = mapped_column(Text)
+    reader_transformation: Mapped[str | None] = mapped_column(Text)
+
+    # --- Topic boundaries ---
+    key_topics: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    required_topics: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    excluded_topics: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+
+    # --- Size & style ---
+    chapter_count: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    target_word_count: Mapped[int] = mapped_column(Integer, default=10000, nullable=False)
+    min_word_count: Mapped[int | None] = mapped_column(Integer)
+    max_word_count: Mapped[int | None] = mapped_column(Integer)
+    writing_style: Mapped[str | None] = mapped_column(String(160))
+    difficulty_level: Mapped[str | None] = mapped_column(String(80))
+    practical_focus: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Free-form directives from the user (special instructions).
+    special_instructions: Mapped[str | None] = mapped_column(Text)
+
+    book: Mapped[WritingBook] = relationship(back_populates="specification")
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +282,8 @@ class WritingChapter(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         GUID(), ForeignKey("bw_books.id"), nullable=False
     )
 
-    # Possible statuses: planned | outlining | generating | draft
-    #   | editing | approved | needs_revision
+    # Possible statuses: planned | outlining | generating | validating
+    #   | draft | editing | approved | needs_revision | needs_review | failed
     chapter_number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     purpose: Mapped[str | None] = mapped_column(Text)
@@ -225,6 +301,14 @@ class WritingChapter(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     actual_word_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Whether the current content has unsaved/uncommitted AI edits.
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # --- Validation & revision tracking (Phase 6 repair) ---
+    # Latest validation verdict for this chapter's content.
+    validation_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # How many auto-revision attempts have been made for the current content.
+    revision_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Short summary of the finished chapter, fed to later chapters for continuity.
+    content_summary: Mapped[str | None] = mapped_column(Text)
 
     book: Mapped[WritingBook] = relationship(back_populates="chapters")
     versions: Mapped[list[ChapterVersion]] = relationship(

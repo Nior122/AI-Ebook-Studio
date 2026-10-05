@@ -92,8 +92,12 @@ async def studio_client() -> AsyncIterator[AsyncClient]:
         yield client
 
     await dispose_engine()
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+    try:
+        if os.path.exists(TEST_DB):
+            os.remove(TEST_DB)
+    except PermissionError:
+        # Windows: a lingering job-runner connection may still hold the file.
+        pass
 
 
 async def _register(client: AsyncClient) -> str:
@@ -128,11 +132,14 @@ async def test_studio_full_flow(studio_client: AsyncClient) -> None:
     headers = _auth(token)
 
     # ---- Smart-AI clarification path ---------------------------------------
-    vague = _setup_payload(details={"topic": "Cooking"})
-    response = await studio_client.post("/api/v1/generation/setup", json=vague, headers=headers)
+    # Truly unusable input (too-short topic) asks questions before creating
+    # anything. Vague-but-usable topics like "Cooking" deliberately proceed:
+    # the specification stage resolves them (relaxed ambiguity checks).
+    too_short = _setup_payload(details={"topic": "AI"})
+    response = await studio_client.post("/api/v1/generation/setup", json=too_short, headers=headers)
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["clarification_questions"], "vague setup should ask questions"
+    assert body["clarification_questions"], "unusable setup should ask questions"
     assert body["project_id"] is None
 
     # ---- One-click generation ----------------------------------------------
@@ -145,7 +152,10 @@ async def test_studio_full_flow(studio_client: AsyncClient) -> None:
     UUID(project_id)
 
     # ---- Generation runs in the background with progress -------------------
-    job = await _wait_job(studio_client, token, job_id)
+    # Multi-stage generation (spec → blueprint → outlines → sections →
+    # validation per chapter) legitimately takes several minutes on a real
+    # provider.
+    job = await _wait_job(studio_client, token, job_id, timeout=900.0)
     assert job["status"] == "COMPLETED", job
     assert job["progress"] == 100
 
@@ -231,12 +241,16 @@ async def test_studio_full_flow(studio_client: AsyncClient) -> None:
     assert response.json()["unread"] >= 0
 
     # ---- Manuscript search ---------------------------------------------------
+    # Search for a word taken from the generated chapter's own title — real
+    # model output can't be predicted, so a hardcoded term is flaky.
+    title_words = [w.strip("#:.!?—") for w in first_chapter["title"].split()]
+    needle = max((w for w in title_words if len(w) >= 4), key=len, default="the")
     response = await studio_client.get(
-        f"/api/v1/projects/{project_id}/search", params={"q": "founder"}, headers=headers
+        f"/api/v1/projects/{project_id}/search", params={"q": needle}, headers=headers
     )
     assert response.status_code == 200, response.text
     results = response.json()["results"]
-    assert results, "search should hit generated chapters"
+    assert results, f"search for {needle!r} should hit generated chapters"
 
     # ---- Bookmarks -----------------------------------------------------------
     response = await studio_client.post(

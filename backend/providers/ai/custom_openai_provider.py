@@ -156,8 +156,10 @@ class OpenAICompatibleProvider(AIProvider):
         }
         if config.temperature is not None:
             body["temperature"] = config.temperature
-        if config.max_tokens is not None:
-            body["max_tokens"] = config.max_tokens
+        # Gateways assume the model's maximum output when max_tokens is
+        # omitted, which makes credit-limited accounts (e.g. OpenRouter 402)
+        # reject requests that a smaller completion would satisfy.
+        body["max_tokens"] = config.max_tokens or 4096
         if config.top_p is not None:
             body["top_p"] = config.top_p
         if config.json_mode:
@@ -197,8 +199,8 @@ class OpenAICompatibleProvider(AIProvider):
         }
         if config.temperature is not None:
             body["temperature"] = config.temperature
-        if config.max_tokens is not None:
-            body["max_tokens"] = config.max_tokens
+        # See generate_text: always bound max_tokens explicitly.
+        body["max_tokens"] = config.max_tokens or 4096
         if schema:
             body["response_format"] = {
                 "type": "json_schema",

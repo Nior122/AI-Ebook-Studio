@@ -11,14 +11,12 @@ Every function enforces ownership via :func:`project_service.get_project`
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -664,9 +662,10 @@ async def set_project_stage(
 # Per-user AI provider keys (encrypted at rest)
 # ---------------------------------------------------------------------------
 def _fernet() -> Fernet:
-    settings = get_settings()
-    key = base64.urlsafe_b64encode(hashlib.sha256(settings.jwt_secret.encode()).digest())
-    return Fernet(key)
+    # Delegates to the shared crypto helper; kept as an alias for callers/tests.
+    from core.crypto import fernet
+
+    return fernet()
 
 
 async def save_provider_key(
@@ -710,21 +709,39 @@ async def provider_key_status(session: AsyncSession, user: User) -> dict[str, An
 
 
 async def build_ai_service_for_user(session: AsyncSession, user: User) -> AIService:
-    """AIService honouring the user's stored provider key, else global config."""
+    """AIService honouring the user's stored key and custom providers.
+
+    Builds a per-user provider registry: the built-in providers (from settings,
+    optionally overridden by the user's saved key for a known provider) plus any
+    custom providers the user has registered. Falls back to global config when
+    the user has no customizations.
+    """
+    from core.crypto import decrypt_secret
+    from providers.ai.registry import ProviderRegistry
+    from services import custom_ai_service
+
+    settings = get_settings()
+
+    # 1) Honour a saved key for a known provider by overriding its settings field.
     result = await session.execute(
         select(AIProviderPreference).where(AIProviderPreference.user_id == user.id)
     )
     prefs = result.scalar_one_or_none()
     if prefs is not None and prefs.uses_custom_key and prefs.encrypted_api_key and prefs.key_provider:
-        try:
-            key = _fernet().decrypt(prefs.encrypted_api_key.encode()).decode()
-        except InvalidToken:
-            key = None
+        key = decrypt_secret(prefs.encrypted_api_key)
         field = _PROVIDER_KEY_FIELDS.get(prefs.key_provider)
         if key and field:
-            settings = get_settings().model_copy(update={field: key})
-            return AIService(settings=settings)
-    return AIService()
+            settings = settings.model_copy(update={field: key})
+
+    # 2) Build a registry from the (possibly key-overridden) settings.
+    registry = ProviderRegistry()
+    registry.load_from_settings(settings)
+
+    # 3) Register the user's custom providers under their unique ids.
+    for instance in await custom_ai_service.build_custom_provider_instances(session, user):
+        registry.register(instance)
+
+    return AIService(settings=settings, registry=registry)
 
 
 # ---------------------------------------------------------------------------

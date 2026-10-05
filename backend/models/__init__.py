@@ -21,6 +21,7 @@ from models.accounts import (
 )
 from models.ai_provider_config import AIProviderPreference
 from models.ai_usage import AIUsageRecord
+from models.custom_ai_provider import CustomAIProvider
 from models.book_writing import (
     BookBlueprint,
     BookBrief,
@@ -66,6 +67,7 @@ __all__ = [
     "Bookmark",
     "Chapter",
     "ChapterVersion",
+    "CustomAIProvider",
     "EditingSession",
     "EditingSuggestion",
     "DocumentAsset",

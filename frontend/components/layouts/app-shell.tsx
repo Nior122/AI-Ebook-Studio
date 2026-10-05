@@ -16,8 +16,8 @@ import {
   IconLogout,
   IconMenu,
   IconClose,
-  IconProjects,
   IconSettings,
+  IconSparkles,
   IconPlus,
 } from "@/components/ui/icons";
 
@@ -30,11 +30,15 @@ interface NavItem {
 const NAV: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: IconDashboard },
   { label: "Settings", href: "/settings", icon: IconSettings },
+  { label: "AI Settings", href: "/settings/ai", icon: IconSparkles },
   { label: "Help", href: "/help", icon: IconHelp },
 ];
 
 function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === href;
+  // /settings/ai has its own nav item, so keep the generic Settings link from
+  // also highlighting while on the AI settings page.
+  if (href === "/settings") return pathname === href;
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 

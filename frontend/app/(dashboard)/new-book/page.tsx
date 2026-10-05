@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -22,6 +23,7 @@ import {
 import { cn } from "@/lib/utils";
 import { generationApi, estimateChapters, WORD_COUNT_PRESETS, type BookSetup } from "@/lib/api/generation";
 import { studioApi } from "@/lib/api/studio";
+import { aiApi } from "@/lib/api/ai";
 import { toastError } from "@/lib/errors";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,11 @@ const LANGUAGES = [
   { value: "zh", label: "Chinese" },
 ];
 
+/**
+ * Fallback provider list. The wizard merges these with the user's custom
+ * providers discovered from the API; the well-known providers always stay
+ * selectable so a user can supply their own API key inline.
+ */
 const PROVIDERS = [
   { value: "openrouter", label: "OpenRouter (recommended)" },
   { value: "openai", label: "OpenAI" },
@@ -113,15 +120,15 @@ const CHAPTER_HEADING_STYLES = [
   { value: "decorative", label: "Decorative — ornamented headings" },
 ];
 
-/** Default model per provider (ported from the original form). */
+/** Default model per provider (fallback; custom providers supply their own). */
 const MODEL_MAP: Record<string, string> = {
   openrouter: "openai/gpt-4o-mini",
   openai: "gpt-4o-mini",
   gemini: "gemini-2.0-flash",
-  groq: "llama-3.3-70b",
+  groq: "llama-3.3-70b-versatile",
 };
 
-/** Per-provider model pick lists for the model select. */
+/** Per-provider model pick lists (fallback; merged with discovered models). */
 const MODELS: Record<string, string[]> = {
   openrouter: [
     "openai/gpt-4o-mini",
@@ -132,7 +139,7 @@ const MODELS: Record<string, string[]> = {
   ],
   openai: ["gpt-4o-mini", "gpt-4o"],
   gemini: ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-pro"],
-  groq: ["llama-3.3-70b", "llama-3.1-8b-instant"],
+  groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
 };
 
 /**
@@ -208,6 +215,11 @@ export default function NewBookPage() {
   const [provider, setProvider] = useState("openrouter");
   const [model, setModel] = useState(MODEL_MAP.openrouter);
   const [apiKey, setApiKey] = useState("");
+  // Dynamic provider/model discovery — includes the user's custom providers.
+  // Falls back to the static PROVIDERS/MODELS/MODEL_MAP when the API is down.
+  const [providerOptions, setProviderOptions] = useState(PROVIDERS);
+  const [modelOptions, setModelOptions] = useState<Record<string, string[]>>(MODELS);
+  const [defaultModels, setDefaultModels] = useState<Record<string, string>>(MODEL_MAP);
   const [creativity, setCreativity] = useState("balanced");
   const [readingLevel, setReadingLevel] = useState("general");
   const [writingQuality, setWritingQuality] = useState("polished");
@@ -235,6 +247,58 @@ export default function NewBookPage() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Discover the user's custom providers and any server-known models so the
+  // provider/model dropdowns aren't limited to the hardcoded fallback list.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [customProviders, allModels] = await Promise.all([
+          aiApi.listCustomProviders(),
+          aiApi.listModels(),
+        ]);
+        if (cancelled) return;
+
+        // Provider options: well-known base + the user's active custom providers.
+        const customOptions = customProviders
+          .filter((p) => p.is_active && Boolean(p.provider_id))
+          .map((p) => ({ value: p.provider_id as string, label: `${p.name} (custom)` }));
+        if (customOptions.length > 0) {
+          setProviderOptions([...PROVIDERS, ...customOptions]);
+        }
+
+        // Model options: static defaults layered with any discovered models.
+        const grouped: Record<string, string[]> = { ...MODELS };
+        for (const m of allModels) {
+          grouped[m.provider] = grouped[m.provider] || [];
+          if (!grouped[m.provider].includes(m.name)) grouped[m.provider].push(m.name);
+        }
+        for (const p of customProviders) {
+          const pid = p.provider_id;
+          if (!pid || !p.is_active) continue;
+          const existing = grouped[pid] || [];
+          const extra = (p.model_ids || []).filter((id) => !existing.includes(id));
+          grouped[pid] = [...existing, ...extra];
+        }
+        setModelOptions(grouped);
+
+        // Default model per custom provider.
+        const defaults: Record<string, string> = { ...MODEL_MAP };
+        for (const p of customProviders) {
+          const pid = p.provider_id;
+          if (!pid || !p.is_active) continue;
+          defaults[pid] = p.default_model || (p.model_ids || [])[0] || "";
+        }
+        setDefaultModels(defaults);
+      } catch {
+        // Discovery failed — the static fallback lists remain in place.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function scrollToSection(index: number) {
     const el = sectionRefs.current[index];
     if (el) {
@@ -247,6 +311,8 @@ export default function NewBookPage() {
   const actualWords = useCustomWords && customWords ? Number(customWords) || 10000 : wordCount;
   const overrideChapters = chaptersOverride ? Number(chaptersOverride) || 0 : 0;
   const effectiveChapters = overrideChapters > 0 ? overrideChapters : estimateChapters(actualWords);
+  // Custom providers already carry their own saved key, so no inline key field.
+  const isCustomProvider = provider.startsWith("custom-");
 
   // -------------------------------------------------------------------------
   // Smart checks (client-side, non-blocking warnings)
@@ -327,7 +393,7 @@ export default function NewBookPage() {
       },
       ai: {
         provider,
-        model: model || MODEL_MAP[provider] || "openai/gpt-4o-mini",
+        model: model || defaultModels[provider] || (modelOptions[provider] || [])[0] || "openai/gpt-4o-mini",
         creativity,
         reading_level: readingLevel,
         writing_quality: writingQuality,
@@ -424,7 +490,8 @@ export default function NewBookPage() {
 
   function handleProviderChange(value: string) {
     setProvider(value);
-    setModel(MODEL_MAP[value] || MODELS[value]?.[0] || MODEL_MAP.openrouter);
+    const models = modelOptions[value] || [];
+    setModel(defaultModels[value] || models[0] || MODEL_MAP.openrouter);
   }
 
   // -------------------------------------------------------------------------
@@ -828,7 +895,7 @@ export default function NewBookPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Model provider" htmlFor="nb-provider">
                   <Select id="nb-provider" value={provider} onChange={(e) => handleProviderChange(e.target.value)}>
-                    {PROVIDERS.map((p) => (
+                    {providerOptions.map((p) => (
                       <option key={p.value} value={p.value}>
                         {p.label}
                       </option>
@@ -837,7 +904,7 @@ export default function NewBookPage() {
                 </Field>
                 <Field label="Model" htmlFor="nb-model">
                   <Select id="nb-model" value={model} onChange={(e) => setModel(e.target.value)}>
-                    {(MODELS[provider] || [MODEL_MAP[provider]]).map((m) => (
+                    {(modelOptions[provider]?.length ? modelOptions[provider] : [model]).map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>
@@ -846,20 +913,33 @@ export default function NewBookPage() {
                 </Field>
               </div>
 
-              <Field
-                label="API key"
-                htmlFor="nb-api-key"
-                hint="Stored encrypted on the server. Leave empty to use the key saved in Settings."
-              >
-                <Input
-                  id="nb-api-key"
-                  type="password"
-                  autoComplete="off"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-…"
-                />
-              </Field>
+              <p className="text-xs text-muted-foreground">
+                Want to use your own model or API key?{" "}
+                <Link
+                  href="/settings/ai"
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  Add a custom provider in AI Settings
+                </Link>{" "}
+                — it will then appear in these dropdowns.
+              </p>
+
+              {!isCustomProvider && (
+                <Field
+                  label="API key"
+                  htmlFor="nb-api-key"
+                  hint="Stored encrypted on the server. Leave empty to use the key saved in Settings."
+                >
+                  <Input
+                    id="nb-api-key"
+                    type="password"
+                    autoComplete="off"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="sk-…"
+                  />
+                </Field>
+              )}
 
               <div className="grid gap-4 sm:grid-cols-3">
                 <Field label="Creativity" htmlFor="nb-creativity">

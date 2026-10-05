@@ -208,3 +208,43 @@ class AISystemStatus(BaseModel):
     status: str
     providers_available: int
     timestamp: datetime
+
+
+# -----------------------------------------------------------------------
+# Custom (user-supplied) AI providers
+# -----------------------------------------------------------------------
+class CustomAIProviderSchema(BaseModel):
+    """A user's custom AI provider (never includes the plaintext API key)."""
+
+    id: str
+    name: str
+    provider_type: str
+    base_url: str | None = None
+    model_ids: list[str] = Field(default_factory=list)
+    default_model: str | None = None
+    supports_structured_output: bool = True
+    is_active: bool = True
+    has_key: bool = False
+    provider_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CustomAIProviderUpsert(BaseModel):
+    """Request body for creating/updating a custom AI provider.
+
+    ``api_key`` is write-only: it is accepted on input, encrypted at rest, and
+    never returned. On update, omit ``api_key`` to keep the existing key.
+    """
+
+    name: str = Field(min_length=1, max_length=80)
+    provider_type: str = Field(description="openai_compatible | anthropic | gemini")
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = None
+    model_ids: list[str] = Field(default_factory=list)
+    default_model: str | None = Field(default=None, max_length=200)
+    supports_structured_output: bool = True
+    is_active: bool = True
+

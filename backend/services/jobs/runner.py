@@ -155,6 +155,42 @@ def _friendly_job_error(job_type: JobType, raw: str | None) -> str:
     return message[:400]
 
 
+async def _create_auto_restore_point(handle: JobHandle) -> None:
+    """Create the automatic project restore point for a completed job.
+
+    Runs BEFORE the job flips to COMPLETED so any observer that sees the
+    terminal status can rely on the restore point already existing.
+    """
+    from models.accounts import User
+    from services.studio_service import create_version
+
+    payload = handle.payload
+    raw_user = payload.get("user_id")
+    if not raw_user:
+        return
+    try:
+        user_id = UUID(str(raw_user))
+    except ValueError:
+        return
+    project_id = await _job_project_id(payload)
+    if project_id is None:
+        return
+    label = JOB_LABELS.get(handle.job_type, handle.job_type.value.replace("_", " ").title())
+    try:
+        async with AsyncSessionLocal() as session:
+            user = await session.get(User, user_id)
+            if user is not None:
+                await create_version(
+                    session, user, project_id,
+                    label=f"After {label}",
+                    reason=f"Automatic restore point created after {label}.",
+                    created_by="auto",
+                    announce=True,
+                )
+    except Exception:
+        logger.exception("Failed to create auto restore point for job %s", handle.id)
+
+
 async def _notify_terminal(handle: JobHandle) -> None:
     """Record a notification + activity when a job finishes (success or failure)."""
     from services.events import publish_project_event, publish_user_event
@@ -196,23 +232,6 @@ async def _notify_terminal(handle: JobHandle) -> None:
                     session, user_id, project_id, "job_completed", f"{label} complete",
                     {"job_id": str(handle.id), "job_type": handle.job_type.value},
                 )
-            if (
-                project_id is not None
-                and handle.status == JobStatus.COMPLETED
-                and handle.job_type in AUTO_VERSION_JOB_TYPES
-            ):
-                from models.accounts import User
-                from services.studio_service import create_version
-
-                user = await session.get(User, user_id)
-                if user is not None:
-                    await create_version(
-                        session, user, project_id,
-                        label=f"After {label}",
-                        reason=f"Automatic restore point created after {label}.",
-                        created_by="auto",
-                        announce=True,
-                    )
     except Exception:
         logger.exception("Failed to record terminal notification for job %s", handle.id)
 
@@ -270,6 +289,11 @@ async def run_job(handle: JobHandle) -> None:
             db_stored = True
 
             result = await handler(session, handle.id, handle.payload, update_progress)
+
+            # The automatic restore point is part of a successful job's
+            # contract: it must exist by the time the job reports COMPLETED.
+            if handle.job_type in AUTO_VERSION_JOB_TYPES:
+                await _create_auto_restore_point(handle)
 
             await queue.handle_completed(handle.id, result)
             handle.result = result

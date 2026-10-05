@@ -8,11 +8,12 @@
 // This is the UI foundation; richer model-selection UX can build on the
 // /ai/capabilities data already returned by the API.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
-import { Input, Label, Select } from "@/components/ui/input";
+import { Input, Select } from "@/components/ui/input";
+import { CustomAIProvidersCard } from "@/components/settings/custom-ai-providers";
 
 import { aiApi, type AIModelInfo, type AIProviderInfo } from "@/lib/api/ai";
 
@@ -59,6 +60,18 @@ export default function AISettingsPage() {
     () => models.filter((m) => m.provider === fallbackProvider),
     [models, fallbackProvider],
   );
+
+  // Refresh just the provider/model discovery lists (used after a custom
+  // provider is added/edited/deleted so new models appear in the dropdowns).
+  const reloadDiscovery = useCallback(async () => {
+    try {
+      const [ps, ms] = await Promise.all([aiApi.listProviders(), aiApi.listModels()]);
+      setProviders(ps);
+      setModels(ms);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to refresh providers.");
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -214,6 +227,8 @@ export default function AISettingsPage() {
           </Field>
         </CardContent>
       </Card>
+
+      <CustomAIProvidersCard onChanged={reloadDiscovery} />
 
       <Card>
         <CardHeader>

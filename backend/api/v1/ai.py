@@ -7,14 +7,14 @@ expose only configured/available providers and never expose API keys.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, status
+from fastapi import APIRouter, Body, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import AIEngineDep, AppSettings, CurrentUser, DatabaseSession, get_ai_service
+from api.dependencies import AIEngineDep, AppSettings, CurrentUser, DatabaseSession
 from models.ai_usage import AIUsageRecord
 from providers.ai.base import (
     AIResponse,
@@ -34,8 +34,9 @@ from schemas.ai import (
     CapabilitiesSchema,
     StructuredRequest,
     AIProviderPreferenceSchema,
+    CustomAIProviderSchema,
+    CustomAIProviderUpsert,
 )
-from services.ai_service import AIService
 from services.models_registry import ModelRegistry
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -46,10 +47,11 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 # -----------------------------------------------------------------------
 @router.get("/providers", response_model=list[ProviderSchema])
 async def list_providers(
-    _user: CurrentUser,
+    user: CurrentUser,
     engine: AIEngineDep,
+    session: DatabaseSession,
 ) -> list[ProviderSchema]:
-    """Return configured providers with availability and model names."""
+    """Return configured providers plus the user's custom providers."""
     results: list[ProviderSchema] = []
     for name in engine.available_providers:
         models = ModelRegistry().by_provider(name)
@@ -63,15 +65,32 @@ async def list_providers(
                 requires_key=name not in ("ollama",),
             )
         )
+
+    # Append the user's active custom providers (already keyed by the user).
+    from services import custom_ai_service
+
+    for row in await custom_ai_service.list_custom_providers(session, user):
+        if not row["is_active"]:
+            continue
+        results.append(
+            ProviderSchema(
+                name=row["provider_id"],
+                available=True,
+                healthy=False,
+                models=list(row["model_ids"]),
+                requires_key=False,
+            )
+        )
     return results
 
 
 @router.get("/models", response_model=list[ModelInfoSchema])
 async def list_models(
-    _user: CurrentUser,
+    user: CurrentUser,
     engine: AIEngineDep,
+    session: DatabaseSession,
 ) -> list[ModelInfoSchema]:
-    """Return every model registered across configured providers."""
+    """Return every built-in model plus the user's custom provider models."""
     registry = ModelRegistry()
     out: list[ModelInfoSchema] = []
     for info in registry.models.values():
@@ -95,6 +114,32 @@ async def list_models(
                 tags=list(info.tags),
             )
         )
+
+    # Append the user's active custom provider models.
+    from services import custom_ai_service
+
+    for row in await custom_ai_service.list_custom_providers(session, user):
+        if not row["is_active"]:
+            continue
+        for model_id in row["model_ids"]:
+            out.append(
+                ModelInfoSchema(
+                    key=f"{row['provider_id']}/{model_id}",
+                    provider=row["provider_id"],
+                    name=model_id,
+                    display_name=f"{row['name']} — {model_id}",
+                    context_window=None,
+                    max_output_tokens=None,
+                    supports_streaming=True,
+                    supports_structured_output=bool(row["supports_structured_output"]),
+                    supports_tools=False,
+                    supports_vision=False,
+                    status="active",
+                    input_cost_per_1m_tokens=0.0,
+                    output_cost_per_1m_tokens=0.0,
+                    tags=["custom"],
+                )
+            )
     return out
 
 
@@ -221,17 +266,49 @@ async def _record_usage(
     await session.commit()
 
 
+async def _generate_with_user_service(
+    session: AsyncSession,
+    user: Any,
+    request: GenerationRequest,
+) -> AIResponse:
+    """Run a generation request through the user's per-user AIService.
+
+    This is what makes user-supplied custom providers (registered under unique
+    ids by ``build_ai_service_for_user``) reachable from the direct AI endpoints.
+    """
+    from services.studio_service import build_ai_service_for_user
+
+    service = await build_ai_service_for_user(session, user)
+    return await service.generate_text(
+        messages=request.messages,
+        model=request.model,
+        provider=request.provider,
+        system_prompt=request.system_prompt,
+        temperature=request.config.temperature,
+        max_tokens=request.config.max_tokens,
+        top_p=request.config.top_p,
+        stream=request.config.stream,
+        json_mode=request.config.json_mode,
+        response_schema=request.config.response_schema,
+        retry_attempts=request.config.retry_attempts,
+        timeout_seconds=request.config.timeout_seconds,
+        user_id=request.user_id,
+        project_id=request.project_id,
+        workspace_id=request.workspace_id,
+        metadata=request.metadata,
+    )
+
+
 @router.post("/chat", response_model=GenerationResponse, status_code=status.HTTP_200_OK)
 async def chat(
     payload: Annotated[ChatRequest, Body(embed=True)],
-    engine: AIEngineDep,
     user: CurrentUser,
     session: DatabaseSession,
     _settings: AppSettings,
 ) -> GenerationResponse:
-    """Multi-turn chat generation."""
+    """Multi-turn chat generation (honours the user's custom providers)."""
     request = _build_request(payload, user_id=user.id)
-    response = await engine.generate(request)
+    response = await _generate_with_user_service(session, user, request)
     await _record_usage(session, request, response, request_type="chat")
     return _to_response(response)
 
@@ -239,14 +316,13 @@ async def chat(
 @router.post("/complete", response_model=GenerationResponse, status_code=status.HTTP_200_OK)
 async def complete(
     payload: Annotated[CompletionRequest, Body(embed=True)],
-    engine: AIEngineDep,
     user: CurrentUser,
     session: DatabaseSession,
     _settings: AppSettings,
 ) -> GenerationResponse:
-    """Single-prompt completion generation."""
+    """Single-prompt completion generation (honours custom providers)."""
     request = _build_request(payload, user_id=user.id)
-    response = await engine.generate(request)
+    response = await _generate_with_user_service(session, user, request)
     await _record_usage(session, request, response, request_type="complete")
     return _to_response(response)
 
@@ -254,12 +330,15 @@ async def complete(
 @router.post("/structured", response_model=dict, status_code=status.HTTP_200_OK)
 async def structured(
     payload: Annotated[StructuredRequest, Body(embed=True)],
-    service: Annotated[AIService, Depends(get_ai_service)],
     user: CurrentUser,
+    session: DatabaseSession,
     _settings: AppSettings,
 ) -> dict:
-    """Generate JSON conforming to a provided schema."""
+    """Generate JSON conforming to a provided schema (honours custom providers)."""
+    from services.studio_service import build_ai_service_for_user
+
     messages = [Message(role=m.role, content=m.content) for m in payload.messages]
+    service = await build_ai_service_for_user(session, user)
     result = await service.generate_structured_output(
         messages=messages,
         schema=payload.response_schema,
@@ -274,7 +353,6 @@ async def structured(
 
 @router.post("/test", response_model=GenerationResponse, status_code=status.HTTP_200_OK)
 async def test_generation(
-    engine: AIEngineDep,
     user: CurrentUser,
     session: DatabaseSession,
 ) -> GenerationResponse:
@@ -289,9 +367,81 @@ async def test_generation(
         model="openai/gpt-4o-mini",
     )
     request = _build_request(payload, user_id=user.id)
-    response = await engine.generate(request)
+    response = await _generate_with_user_service(session, user, request)
     await _record_usage(session, request, response, request_type="test")
     return _to_response(response)
+
+
+# -----------------------------------------------------------------------
+# Custom (user-supplied) AI providers
+# -----------------------------------------------------------------------
+@router.get("/custom-providers", response_model=list[CustomAIProviderSchema])
+async def list_custom_providers(
+    user: CurrentUser,
+    session: DatabaseSession,
+) -> list[dict]:
+    """List the current user's custom AI providers (keys masked)."""
+    from services import custom_ai_service
+
+    return await custom_ai_service.list_custom_providers(session, user)
+
+
+@router.post(
+    "/custom-providers",
+    response_model=CustomAIProviderSchema,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_custom_provider(
+    payload: Annotated[CustomAIProviderUpsert, Body(embed=True)],
+    user: CurrentUser,
+    session: DatabaseSession,
+) -> dict:
+    """Create a custom AI provider. The API key is encrypted at rest."""
+    from services import custom_ai_service
+
+    return await custom_ai_service.create_custom_provider(session, user, payload)
+
+
+@router.put("/custom-providers/{provider_pk}", response_model=CustomAIProviderSchema)
+async def update_custom_provider(
+    provider_pk: UUID,
+    payload: Annotated[CustomAIProviderUpsert, Body(embed=True)],
+    user: CurrentUser,
+    session: DatabaseSession,
+) -> dict:
+    """Update a custom AI provider. Omit api_key to keep the existing key."""
+    from services import custom_ai_service
+
+    return await custom_ai_service.update_custom_provider(session, user, provider_pk, payload)
+
+
+@router.delete(
+    "/custom-providers/{provider_pk}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_custom_provider(
+    provider_pk: UUID,
+    user: CurrentUser,
+    session: DatabaseSession,
+) -> Response:
+    """Soft-delete a custom AI provider."""
+    from services import custom_ai_service
+
+    await custom_ai_service.delete_custom_provider(session, user, provider_pk)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/custom-providers/{provider_pk}/test")
+async def test_custom_provider(
+    provider_pk: UUID,
+    user: CurrentUser,
+    session: DatabaseSession,
+) -> dict:
+    """Send a tiny completion through the provider to verify connectivity."""
+    from services import custom_ai_service
+
+    return await custom_ai_service.test_custom_provider(session, user, provider_pk)
 
 
 # -----------------------------------------------------------------------

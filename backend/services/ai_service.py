@@ -59,6 +59,25 @@ class AIService:
         self._model_registry = model_registry or ModelRegistry()
         if not self._registry.list():
             self._registry.load_from_settings(self.settings)
+        # Per-book count of requests served by a non-primary provider, so
+        # features can tell when their content silently came from an
+        # offline fallback instead of the requested model.
+        self._fallback_counts: dict[str, int] = {}
+
+    # ------------------------------------------------------------------
+    # fallback usage accounting
+    # ------------------------------------------------------------------
+    def _note_fallback(self, request: Any) -> None:
+        """Record that *request* was served by a fallback provider."""
+        metadata = getattr(request, "metadata", None) or {}
+        book_id = str(metadata.get("book_id") or "")
+        if not book_id:
+            return
+        self._fallback_counts[book_id] = self._fallback_counts.get(book_id, 0) + 1
+
+    def consume_fallback_count(self, book_id: Any) -> int:
+        """Return and clear how many requests for this book fell back."""
+        return self._fallback_counts.pop(str(book_id), 0)
 
     # ------------------------------------------------------------------
     # public API
@@ -176,9 +195,21 @@ class AIService:
                 return await provider_obj.generate_structured_output(request, schema)
             except AIProviderError as exc:
                 last_exc = exc
+                logger.warning(
+                    "structured_attempt_failed",
+                    provider=resolved_provider,
+                    model=resolved_model,
+                    task=task,
+                    error=str(exc),
+                )
                 if not exc.retryable:
                     break
         if self.settings.ai_fallback_enabled:
+            logger.info(
+                "structured_fallback_started",
+                primary=resolved_provider,
+                task=task,
+            )
             fallback = await self._fallback(request, resolved_provider, task)
             if isinstance(fallback, dict):
                 return fallback
@@ -238,11 +269,15 @@ class AIService:
     # ------------------------------------------------------------------
     def _resolve(self, model: str | None, provider: str | None) -> tuple[str, str]:
         """Return (model_name, provider_id)."""
+        # An explicit provider always wins. Namespaced model ids like
+        # "openai/gpt-4o-mini" are valid model names on OpenRouter-style APIs;
+        # deriving the provider from the prefix would silently reroute calls
+        # to an unconfigured vendor and then onto offline fallbacks.
+        if provider and model:
+            return model, provider
         if model and "/" in model:
             provider_id, model_name = model.split("/", 1)
             return model_name, provider_id
-        if provider and model:
-            return model, provider
         # fall back to configured defaults
         default = self.settings.ai_default_model
         if default and "/" in default:
@@ -334,10 +369,13 @@ class AIService:
             try:
                 logger.info("fallback_attempt", provider=pid, model=adjusted.model)
                 if request.config.json_mode and request.config.response_schema:
-                    return await provider_obj.generate_structured_output(
+                    result = await provider_obj.generate_structured_output(
                         adjusted, request.config.response_schema
                     )
+                    self._note_fallback(request)
+                    return result
                 response = await provider_obj.generate_text(adjusted)
+                self._note_fallback(request)
                 return self._annotate(response, task)
             except AIProviderError as exc:
                 logger.warning("fallback_failed", provider=pid, error=str(exc))

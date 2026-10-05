@@ -106,14 +106,30 @@ async def test_streaming_yields_provider_chunks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_status_and_completion_endpoint(client: AsyncClient) -> None:
-    """AI endpoints expose health and use the mocked engine for completions."""
+async def test_ai_status_and_completion_endpoint(client: AsyncClient, monkeypatch) -> None:
+    """AI endpoints expose health and use the mocked providers for completions."""
     engine = build_engine()
 
     async def override_engine() -> AIEngine:
         return engine
 
     client._transport.app.dependency_overrides[get_ai_engine] = override_engine  # type: ignore[attr-defined]  # noqa: SLF001
+
+    # The generation endpoints resolve a per-user AIService (so user-supplied
+    # custom providers work). Point that seam at the same mocked providers so
+    # the test stays deterministic.
+    from providers.ai.registry import ProviderRegistry
+    from services.ai_service import AIService
+
+    async def fake_build_user_service(session, user):
+        registry = ProviderRegistry()
+        registry.register(MockProvider("openai"))
+        registry.register(MockProvider("anthropic"))
+        return AIService(registry=registry)
+
+    monkeypatch.setattr(
+        "services.studio_service.build_ai_service_for_user", fake_build_user_service
+    )
 
     registration = await client.post(
         "/api/v1/auth/register",

@@ -71,8 +71,12 @@ async def qa_client() -> Any:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     await dispose_engine()
-    if os.path.exists(TEST_DB):
-        os.remove(TEST_DB)
+    try:
+        if os.path.exists(TEST_DB):
+            os.remove(TEST_DB)
+    except PermissionError:
+        # Windows: a lingering job-runner connection may still hold the file.
+        pass
 
 
 async def _register(client: AsyncClient, email: str) -> dict[str, str]:
@@ -225,7 +229,10 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
     body = response.json()
     assert body["project_id"] and body["job_id"] and body["writing_book_id"]
     project_id, writing_book_id = body["project_id"], body["writing_book_id"]
-    job = await _wait_job(qa_client, account["token"], body["job_id"])
+    # Multi-stage generation (spec → blueprint → outlines → sections →
+    # validation per chapter) legitimately takes several minutes on a real
+    # provider.
+    job = await _wait_job(qa_client, account["token"], body["job_id"], timeout=900.0)
     assert job["status"] == "COMPLETED", job
 
     response = await qa_client.get(
@@ -272,7 +279,9 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
         headers=headers,
     )
     assert response.status_code == 202, response.text
-    translation_job = await _wait_job(qa_client, account["token"], response.json()["id"])
+    # Full books translate chapter-by-chapter through the AI provider; a
+    # substantive manuscript takes a few minutes.
+    translation_job = await _wait_job(qa_client, account["token"], response.json()["id"], timeout=420.0)
     if translation_job["status"] == "FAILED":
         message = translation_job.get("error_message") or ""
         assert "provider key" in message or "LibreTranslate" in message, message

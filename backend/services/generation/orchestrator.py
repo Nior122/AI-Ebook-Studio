@@ -1,16 +1,21 @@
 """Book generation orchestrator.
 
-Runs the one-click book generation flow as a background job. Walks through
-every phase: brief → blueprint → chapters → polish → format → validation.
+Runs the one-click book generation flow as a background job. Delegates the
+actual book production to :class:`services.generation.pipeline.GenerationPipeline`
+— a multi-stage, resume-friendly pipeline:
 
-Uses existing `services/book_writing/service.py` functions and
-`BookWritingEngine` — no duplicate logic.
+    Specification (topic lock) → Blueprint → Chapter outlines
+    → section-by-section writing → validation → auto-revision
+    → introduction/conclusion → manuscript assembly + quality report
+
+This module keeps the job-integration concerns: resolving user/project/book,
+persisting setup choices, progress reporting, activity/notification recording,
+and failure handling.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -23,19 +28,13 @@ from models.assets import BookSettings
 from models.book_writing import (
     WritingBook,
     WritingBookSettings,
-    WritingChapter,
 )
 from models.project import Book, Project
 from schemas.book_setup import BookSetupRequest
 from schemas.projects import BookCreateRequest
 from services import book_service as project_book_service
-from services.ai_service import AIService
 from services.book_writing.engine import BookWritingEngine
-from services.book_writing.service import (
-    generate_brief,
-    generate_blueprint,
-    list_chapters as list_writing_chapters,
-)
+from services.generation.pipeline import GenerationPipeline
 from services.jobs.runner import ProgressCallback
 from services.workspace_service import get_or_create_default_workspace
 from services import studio_service
@@ -44,15 +43,64 @@ from services.events import publish_project_event
 logger = logging.getLogger("api.generation.orchestrator")
 
 
-def _wc(text: str | None) -> int:
-    return len(re.findall(r"\S+", text or ""))
+async def _reconstruct_setup(
+    session: AsyncSession, book: Book, wbook: WritingBook
+) -> BookSetupRequest:
+    """Rebuild a setup payload from stored state (resume without original)."""
+    from services.generation.pipeline import load_specification
+
+    spec = await load_specification(session, wbook.id)
+    ai_meta = (book.metadata_json or {}).get("ai_settings", {}) or {}
+
+    topic = (
+        (spec.topic if spec is not None else None)
+        or book.description
+        or wbook.description
+        or wbook.title
+    )
+    words = (
+        (spec.target_word_count if spec is not None else None)
+        or wbook.target_word_count
+        or 10000
+    )
+    chapters = spec.chapter_count if spec is not None else None
+
+    return BookSetupRequest.model_validate(
+        {
+            "details": {
+                "title": wbook.title,
+                "subtitle": wbook.subtitle,
+                "topic": topic,
+                "target_audience": wbook.target_audience or "general readers",
+                "tone": wbook.tone or "conversational",
+                "writing_style": "practical_guide",
+                "language": wbook.language or "en",
+                "author": wbook.author_name,
+            },
+            "size": {
+                "total_word_count": words,
+                **({"chapters_override": chapters} if chapters else {}),
+            },
+            "ai": {
+                "provider": ai_meta.get("provider", "openrouter"),
+                "model": ai_meta.get("model", "openai/gpt-4o-mini"),
+                **(
+                    {"creativity": ai_meta["creativity"]}
+                    if ai_meta.get("creativity")
+                    else {}
+                ),
+            },
+            "special_instructions": {
+                "instructions": (book.metadata_json or {}).get("special_instructions") or ""
+            },
+        }
+    )
 
 
 async def _get_or_create(
     session: AsyncSession, payload: dict[str, object]
 ) -> tuple[UserModel, Project, Book, WritingBook, BookSetupRequest]:
     user_id = UUID(str(payload["user_id"]))
-    setup = BookSetupRequest.model_validate(payload["setup"])
 
     user_result = await session.execute(
         select(UserModel).where(UserModel.id == user_id)
@@ -61,22 +109,54 @@ async def _get_or_create(
     if user is None:
         raise ValueError(f"User {user_id} not found.")
 
-    existing_book_id = payload.get("book_id")
-    if existing_book_id:
-        book_id = UUID(str(existing_book_id))
-        book = await session.get(Book, book_id)
-        project = await session.get(Project, book.project_id)
-        wb_result = await session.execute(
-            select(WritingBook).where(
-                WritingBook.user_id == user.id,
-                WritingBook.title == setup.details.title,
-                WritingBook.deleted_at.is_(None),
+    raw_setup = payload.get("setup")
+    setup = BookSetupRequest.model_validate(raw_setup) if raw_setup else None
+
+    book: Book | None = None
+    wbook: WritingBook | None = None
+
+    # Resume path 1: writing book id (most reliable).
+    existing_writing_book_id = payload.get("writing_book_id")
+    if existing_writing_book_id:
+        wbook = await session.get(WritingBook, UUID(str(existing_writing_book_id)))
+        if wbook is None or wbook.deleted_at is not None or wbook.user_id != user.id:
+            raise ResourceNotFoundError("WritingBook not found for existing book")
+        book_result = await session.execute(
+            select(Book).where(
+                Book.metadata_json["writing_book_id"].as_string() == str(wbook.id)
             )
         )
-        wbook = wb_result.scalar()
-        if wbook is None:
+        book = book_result.scalars().first()
+
+    # Resume path 2: primary book id.
+    if wbook is None and payload.get("book_id"):
+        book = await session.get(Book, UUID(str(payload["book_id"])))
+        if book is not None:
+            wb_id = (book.metadata_json or {}).get("writing_book_id")
+            if wb_id:
+                wbook = await session.get(WritingBook, UUID(str(wb_id)))
+            elif setup is not None:
+                wb_result = await session.execute(
+                    select(WritingBook).where(
+                        WritingBook.user_id == user.id,
+                        WritingBook.title == setup.details.title,
+                        WritingBook.deleted_at.is_(None),
+                    )
+                )
+                wbook = wb_result.scalar()
+
+    if wbook is not None:
+        if book is None:
+            raise ResourceNotFoundError("Primary Book not found for writing book")
+        if wbook.deleted_at is not None or wbook.user_id != user.id:
             raise ResourceNotFoundError("WritingBook not found for existing book")
+        if setup is None:
+            setup = await _reconstruct_setup(session, book, wbook)
+        project = await session.get(Project, book.project_id)
         return user, project, book, wbook, setup
+
+    if setup is None:
+        raise ValueError("Payload must include a setup for first-run generation.")
 
     ws = await get_or_create_default_workspace(session, user)
     project = Project(
@@ -116,22 +196,13 @@ async def _get_or_create(
     wbook = wb_result.scalar()
     if wbook is None:
         raise RuntimeError("WritingBook was not created by create_primary_book")
-    return user, project, book, wbook, setup, setup.special_instructions.instructions
+    return user, project, book, wbook, setup
 
 
-async def generation_handler(
-    session: AsyncSession,
-    _job_id: UUID,
-    payload: dict[str, object],
-    progress: ProgressCallback,
-) -> dict[str, object] | None:
-    await progress(0, "Starting book generation")
-
-    user, project, book, wbook, setup = await _get_or_create(
-        session, payload
-    )
-
-    # Studio UX: mark the project as generating and persist setup choices.
+def _apply_setup_side_effects(
+    book: Book, project: Project, setup: BookSetupRequest
+) -> None:
+    """Persist setup choices that live outside the writing pipeline."""
     project.stage = "generating"
     project.updated_at = datetime.now(UTC)
     if setup.details.author and not book.author_name:
@@ -153,145 +224,12 @@ async def generation_handler(
         },
         "special_instructions": setup.special_instructions.instructions,
     }
-    await session.flush()
 
-    temp_map = {"creative": 0.9, "balanced": 0.7, "precise": 0.4, "fast": 0.8}
-    temp = temp_map.get(setup.ai.creativity, 0.7)
-    provider = setup.ai.provider
-    model = setup.ai.model
 
-    total_chapters = setup.size.effective_chapter_count
-    words_per = max(setup.size.total_word_count // max(total_chapters, 1), 500)
-
-    from services.studio_service import build_ai_service_for_user
-
-    engine = BookWritingEngine(await build_ai_service_for_user(session, user))
-    ws_result = await session.execute(
-        select(WritingBookSettings).where(WritingBookSettings.book_id == wbook.id)
-    )
-    wb_settings = ws_result.scalar_one_or_none()
-    if wb_settings is None:
-        wb_settings = WritingBookSettings(book_id=wbook.id)
-        session.add(wb_settings)
-    wb_settings.tone = setup.details.tone
-    if setup.ai.reading_level:
-        wb_settings.reading_level = setup.ai.reading_level
-    wb_settings.use_practical_exercises = (
-        "high" if setup.ai.generate_exercises else "medium"
-    )
-
-    # Phase 1: Brief (5% — 12%)
-    await progress(5, "Generating book brief")
-    await generate_brief(
-        session, user, wbook.id, provider=provider, model=model, temperature=temp
-    )
-    await progress(12, "Brief complete — your book has a clear identity")
-
-    # Phase 2: Blueprint (12% — 22%)
-    await progress(13, "Creating chapter blueprint")
-    blueprint = await generate_blueprint(
-        session, user, wbook.id, provider=provider, model=model, temperature=temp
-    )
-    await progress(22, "Blueprint complete — chapters planned")
-    chapter_plans = list(getattr(blueprint, "chapters", []) or [])
-    await studio_service.record_activity(
-        session, user.id, project.id, "outline_created",
-        f"Outline created — {len(chapter_plans)} chapters planned",
-        {"chapter_count": len(chapter_plans)},
-    )
-
-    # Phase 3: Write chapters (23% — 85%)
-    # Resume-friendly: chapters that already have content are kept as-is,
-    # so re-running generation continues where an interrupted run stopped
-    # instead of discarding finished work.
-    existing = await list_writing_chapters(session, user, wbook.id)
-    keep_by_number: dict[int, WritingChapter] = {}
-    for ch in existing:
-        if ch.content and ch.status not in ("planned", "outlining"):
-            keep_by_number[ch.chapter_number] = ch
-            continue
-        ch.deleted_at = datetime.now(UTC)
-    await session.flush()
-
-    ch_plans = getattr(blueprint, "chapters", []) or []
-    if isinstance(blueprint, dict):
-        ch_plans = blueprint.get("chapters", [])
-    actual_count = max(len(ch_plans), 1)
-    chapter_spread = 62
-    per_pct = chapter_spread / actual_count if actual_count else 62
-
-    total_words = 0
-
-    for i, ch_plan in enumerate(ch_plans):
-        chapter_num = i + 1
-        plan = ch_plan if isinstance(ch_plan, dict) else {}
-        title = str(plan.get("title", f"Chapter {chapter_num}"))
-        objective = str(plan.get("objective", ""))
-        summary = str(plan.get("summary", ""))
-        target_wc = int(plan.get("estimated_word_count", words_per))
-
-        pct = int(23 + per_pct * i)
-        await progress(pct, f"Writing Chapter {chapter_num}: {title[:60]}")
-
-        kept = keep_by_number.get(chapter_num)
-        if kept is not None:
-            kept.title = title
-            kept.purpose = objective
-            kept.objective = summary[:128]
-            kept.summary = summary[:255]
-            kept.target_word_count = target_wc
-            kept.status = "draft"
-            total_words += kept.actual_word_count or 0
-            await session.flush()
-            continue
-
-        chapter = WritingChapter(
-            book_id=wbook.id,
-            chapter_number=chapter_num,
-            title=title,
-            purpose=objective,
-            objective=summary[:128],
-            summary=summary[:255],
-            target_word_count=target_wc,
-            status="outlining",
-        )
-        session.add(chapter)
-        await session.flush()
-
-        try:
-            content = await engine.generate_chapter_content(
-                session, wbook, chapter,
-                provider=provider, model=model, temperature=temp,
-            )
-            chapter.content = content
-            chapter.actual_word_count = _wc(content)
-            chapter.status = "draft"
-            total_words += _wc(content)
-            await studio_service.record_activity(
-                session, user.id, project.id, "chapter_generated",
-                f"Chapter {chapter_num} generated — {title[:60]}",
-                {"chapter_id": str(chapter.id), "words": _wc(content)},
-            )
-        except Exception as ce:
-            logger.warning("Chapter %d generation failed: %s", chapter_num, ce, exc_info=True)
-            chapter.content = f"[Chapter {chapter_num} generation failed — please regenerate. Error: {ce}]"
-            chapter.status = "failed"
-
-        await session.flush()
-
-    await progress(85, "All chapters written")
-
-    # Phase 4: Polish (86% — 92%)
-    await progress(88, "Reviewing consistency across chapters")
-    wbook.current_step = "editing"
-    await progress(92, "Applying layout settings")
-    await studio_service.record_activity(
-        session, user.id, project.id, "formatting_complete",
-        f"Formatting applied — {setup.layout.page_size} page, {setup.layout.body_font} {setup.layout.body_size}pt body",
-        {"page_size": setup.layout.page_size},
-    )
-
-    # Apply layout settings to Project BookSettings (the actual formatting model)
+async def _apply_layout_settings(
+    session: AsyncSession, book: Book, setup: BookSetupRequest
+) -> None:
+    """Apply layout settings to the Project BookSettings (formatting model)."""
     bs_result = await session.execute(
         select(BookSettings).where(BookSettings.book_id == book.id)
     )
@@ -320,24 +258,136 @@ async def generation_handler(
         bs.page_height = float(setup.layout.custom_page_size.get("height", 9))
     await session.flush()
 
-    # Phase 5: Validation
-    await progress(94, "Running KDP validation checks")
-    await progress(96, "Final optimization pass")
 
-    wbook.status = "completed"
-    wbook.current_step = "export"
+async def generation_handler(
+    session: AsyncSession,
+    job_id: UUID,
+    payload: dict[str, object],
+    progress: ProgressCallback,
+) -> dict[str, object] | None:
+    await progress(0, "Starting book generation")
+
+    user, project, book, wbook, setup = await _get_or_create(session, payload)
+
+    _apply_setup_side_effects(book, project, setup)
+
+    # Record which job is driving this book (resume/status support).
+    wbook.generation_job_id = job_id
+    await session.flush()
+
+    temp_map = {"creative": 0.9, "balanced": 0.7, "precise": 0.4, "fast": 0.8}
+    temp = temp_map.get(setup.ai.creativity, 0.7)
+    provider = setup.ai.provider
+    model = setup.ai.model
+
+    from services.studio_service import build_ai_service_for_user
+
+    engine = BookWritingEngine(await build_ai_service_for_user(session, user))
+
+    # Persist writing-style preferences onto the book settings row.
+    ws_result = await session.execute(
+        select(WritingBookSettings).where(WritingBookSettings.book_id == wbook.id)
+    )
+    wb_settings = ws_result.scalar_one_or_none()
+    if wb_settings is None:
+        wb_settings = WritingBookSettings(book_id=wbook.id)
+        session.add(wb_settings)
+    wb_settings.tone = setup.details.tone
+    if setup.ai.reading_level:
+        wb_settings.reading_level = setup.ai.reading_level
+    wb_settings.use_practical_exercises = (
+        "high" if setup.ai.generate_exercises else "medium"
+    )
+    wb_settings.preferred_provider = provider
+    wb_settings.preferred_model = model
+    wb_settings.temperature = temp
+    await session.flush()
+
+    async def announce(kind: str, message: str) -> None:
+        await studio_service.record_activity(
+            session, user.id, project.id, kind, message, {}
+        )
+
+    pipeline = GenerationPipeline(
+        session,
+        engine,
+        user_id=user.id,
+        wbook=wbook,
+        setup=setup.model_dump(),
+        provider=provider,
+        model=model,
+        temperature=temp,
+        progress=progress,
+        announce=announce,
+    )
+
+    try:
+        summary = await pipeline.run()
+    except Exception as exc:
+        logger.exception("Book generation failed for book %s", wbook.id)
+        wbook.status = "failed"
+        state = dict(wbook.generation_state or {})
+        state["last_error"] = str(exc)
+        wbook.generation_state = {**state}
+        project.stage = "draft"
+        project.updated_at = datetime.now(UTC)
+        # Commit explicitly: the job runner rolls back its session when the
+        # handler raises, so the failure state would otherwise be lost.
+        await session.commit()
+        raise
+
+    # Layout + formatting side effects.
+    await _apply_layout_settings(session, book, setup)
+    await studio_service.record_activity(
+        session, user.id, project.id, "formatting_complete",
+        f"Formatting applied — {setup.layout.page_size} page, "
+        f"{setup.layout.body_font} {setup.layout.body_size}pt body",
+        {"page_size": setup.layout.page_size},
+    )
+
+    chapter_count = int(summary.get("chapter_count", 0))
+    total_words = int(summary.get("total_words", 0))
+    status = str(summary.get("status", "ready_for_formatting"))
+    quality_report = summary.get("quality_report") or {}
+    fallback_units = int(quality_report.get("fallback_generated_units") or 0)
+
     project.stage = "review"
     project.updated_at = datetime.now(UTC)
     await session.flush()
 
-    await progress(99, "Book generation complete")
-    await progress(100, "Generation finished")
-
-    await studio_service.record_activity(
-        session, user.id, project.id, "generation_complete",
-        f"Book generated — {actual_count} chapters, {total_words:,} words",
-        {"chapter_count": actual_count, "total_words": total_words},
-    )
+    if fallback_units:
+        await studio_service.record_activity(
+            session, user.id, project.id, "generation_complete",
+            f"Book generated with quality warnings — {chapter_count} chapters, "
+            f"{total_words:,} words ({fallback_units} section(s) written by the "
+            "offline fallback because the AI provider was unavailable)",
+            {"chapter_count": chapter_count, "total_words": total_words,
+             "fallback_generated_units": fallback_units},
+        )
+        await studio_service.create_notification(
+            session, user.id, project.id, "generation_complete",
+            "Book generated — review needed",
+            f"Your book was generated ({chapter_count} chapters, {total_words:,} words), "
+            "but the AI provider became unavailable partway through and some content "
+            "came from the offline template. Please regenerate before publishing.",
+            level="warning",
+            action_type="open_project",
+            action_payload={"project_id": str(project.id)},
+        )
+    else:
+        await studio_service.record_activity(
+            session, user.id, project.id, "generation_complete",
+            f"Book generated — {chapter_count} chapters, {total_words:,} words",
+            {"chapter_count": chapter_count, "total_words": total_words},
+        )
+        await studio_service.create_notification(
+            session, user.id, project.id, "generation_complete",
+            "Book generation complete",
+            f"Your book is ready to review — {chapter_count} chapters, {total_words:,} words.",
+            level="success",
+            action_type="open_project",
+            action_payload={"project_id": str(project.id)},
+        )
     await studio_service.create_version(
         session, user, project.id,
         "After generation",
@@ -345,24 +395,18 @@ async def generation_handler(
         created_by="auto",
         announce=False,
     )
-    await studio_service.create_notification(
-        session, user.id, project.id, "generation_complete",
-        "Book generation complete",
-        f"Your book is ready to review — {actual_count} chapters, {total_words:,} words.",
-        level="success",
-        action_type="open_project",
-        action_payload={"project_id": str(project.id)},
-    )
     publish_project_event(str(project.id), "generation.completed", {
         "project_id": str(project.id), "book_id": str(book.id),
-        "chapter_count": actual_count, "total_words": total_words,
+        "chapter_count": chapter_count, "total_words": total_words,
+        "status": status,
     })
 
     return {
         "project_id": str(project.id),
         "book_id": str(book.id),
         "writing_book_id": str(wbook.id),
-        "chapter_count": actual_count,
+        "chapter_count": chapter_count,
         "total_words": total_words,
-        "status": "completed",
+        "status": status,
+        "quality_report": summary.get("quality_report"),
     }

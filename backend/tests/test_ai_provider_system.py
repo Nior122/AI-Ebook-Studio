@@ -278,3 +278,61 @@ async def test_ai_endpoints_work_with_auth(client: AsyncClient) -> None:
     for path in ("/api/v1/ai/providers", "/api/v1/ai/models", "/api/v1/ai/capabilities"):
         resp = await client.get(path, headers=headers)
         assert resp.status_code == 200, f"{path} -> {resp.status_code}: {resp.text[:200]}"
+
+
+# ---------------------------------------------------------------------------
+# max_tokens bounding (credit-limited gateways)
+# ---------------------------------------------------------------------------
+class _CapturingClient:
+    """Stands in for httpx.AsyncClient to capture the outgoing request body."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    async def post(self, path: str, headers=None, json=None):  # noqa: A002
+        self.bodies.append(json or {})
+
+        class _Resp:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+
+        return _Resp()
+
+
+def _request(max_tokens=None):
+    from providers.ai.base import GenerationConfig, GenerationRequest, Message
+
+    return GenerationRequest(
+        messages=[Message(role="user", content="hello")],
+        model="test-model",
+        provider="openrouter",
+        config=GenerationConfig(max_tokens=max_tokens),
+    )
+
+
+async def test_openrouter_bounds_max_tokens_when_unset() -> None:
+    provider = OpenRouterProvider(api_key="sk-test")
+    provider._client = _CapturingClient()
+
+    await provider.generate_text(_request(max_tokens=None))
+    await provider.generate_structured_output(_request(max_tokens=None), {"type": "object"})
+
+    for body in provider._client.bodies:
+        assert body["max_tokens"] == 4096, body
+
+
+async def test_openrouter_respects_explicit_max_tokens() -> None:
+    provider = OpenRouterProvider(api_key="sk-test")
+    provider._client = _CapturingClient()
+
+    await provider.generate_text(_request(max_tokens=1234))
+    assert provider._client.bodies[0]["max_tokens"] == 1234
