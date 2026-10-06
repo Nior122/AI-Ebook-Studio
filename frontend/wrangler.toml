@@ -2,7 +2,8 @@
 #
 # This app deploys through @opennextjs/cloudflare:
 #   - `npm run build`  -> runs `opennextjs-cloudflare build`, producing the
-#                         worker bundle at .open-next/worker.js
+#                         worker bundle at .open-next/worker.js; the OpenNext
+#                         config delegates its nested Next build to build:next.
 #   - `wrangler deploy`-> uploads that bundle as the "ai-ebook-studio" worker
 #
 # Cloudflare dashboard (Workers & Pages -> Workers -> Workers Builds,

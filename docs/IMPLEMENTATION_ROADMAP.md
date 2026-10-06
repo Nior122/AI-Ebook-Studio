@@ -210,3 +210,11 @@ Work has started on P0.1, P0.2, P0.3, P0.4, P0.5, and P0.6. These are **in progr
 3. Continue P0.3 by validating the migration on populated PostgreSQL and exposing ambiguous/collision-skipped legacy rows for operator repair; keep the verified asset mapping stable before expanding image or KDP behavior.
 4. Proceed through P0.4–P0.6 production configuration and CI integration; do not mark gates closed on unit tests alone.
 5. Advance P1 in dependency order; keep DOCX/EPUB/PDF work on a single manuscript representation.
+
+## Deployment-readiness execution update — 2026-10-06
+
+The requested GitHub push and draft PR are in place. GitHub Actions run `37404838248` passed for the pushed `0ae1573` snapshot, but its Cloudflare Workers Builds check failed. The account-only Dashboard logs could not be accessed from the checkout, so the failure was reproduced with the repository's configured build command instead of requesting or using external credentials.
+
+That local reproduction exposed a recursive OpenNext build: the adapter's default Next.js command was `npm run build`, which called the OpenNext build again. The frontend OpenNext configuration now selects `npm run build:next`; the standalone trace root is aligned with OpenNext's expected package-local output. CI now exercises `npm run build` (the actual Cloudflare Worker artifact), not just `next build`. A clean `npm ci`, the 14 frontend tests, typecheck, lint, full OpenNext build, and `wrangler deploy --dry-run` all pass locally. The transitive critical `proxy-addr` advisory was also fixed through a non-breaking lockfile update; `npm audit` now reports **12 advisories (4 moderate, 8 high, 0 critical)**.
+
+**Current gate:** push this fix, then verify the new GitHub Actions and Workers Builds results before any deployment-readiness statement. Local dry-run does not upload a Worker or verify Render, PostgreSQL, production secrets, browser auth, or external AI providers. Keep those acceptance gates open. After remote checks, return to P0.1 translation cancellation/export/side-by-side and populated PostgreSQL validation, then resume the existing P0/P1 order.

@@ -79,6 +79,6 @@ jobs:
       - name: Lint frontend
         run: npm run lint
         working-directory: frontend
-      - name: Build Next.js production bundle
-        run: npm run build:next
+      - name: Build OpenNext Cloudflare Worker
+        run: npm run build
         working-directory: frontend
