@@ -10,19 +10,16 @@ startup so the in-process worker pool knows how to execute each JobType.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.accounts import User
 from services.cover.engine import get_cover_engine
 from services.export.engine import get_export_engine
 from services.generation.orchestrator import generation_handler
-from services.marketing.engine import get_marketing_engine
-from services.translation.engine import get_translation_engine
 from services.jobs.enums import JobType
-from services.jobs.runner import JobHandler, ProgressCallback, register_handler
+from services.jobs.runner import ProgressCallback, register_handler
 
 
 def _payload_user(payload: dict[str, object]) -> tuple[UUID | None, UUID | None]:
@@ -35,17 +32,11 @@ def _payload_user(payload: dict[str, object]) -> tuple[UUID | None, UUID | None]
     )
 
 
-async def _load_user(session: AsyncSession, user_id: UUID):
-    """Load the user for the job from the DB.
-
-    Returns a User instance (the dynamically resolved model class) without
-    a strict type annotation to avoid ORM-class circular imports.
-    """
+async def _load_user(session: AsyncSession, user_id: UUID) -> User:
+    """Load an authenticated job owner from the database."""
     from sqlalchemy import select as sa_select
 
-    from models.accounts import User as UserModel
-
-    result = await session.execute(sa_select(UserModel).where(UserModel.id == user_id))
+    result = await session.execute(sa_select(User).where(User.id == user_id))
     user = result.scalar()
     if user is None:
         raise ValueError(f"User {user_id} not found.")
@@ -135,6 +126,9 @@ async def _cover_handler(
     user = await _load_user(session, user_id)
 
     component = str(payload.get("component", "all"))
+    if component not in {"front", "back", "spine", "all"}:
+        raise ValueError(f"Unsupported cover component '{component}'.")
+
     from services.ai_service import AIService
 
     engine = get_cover_engine(AIService())
@@ -142,24 +136,15 @@ async def _cover_handler(
 
     if component in {"front", "all"}:
         await progress(20, "Generating front cover")
-        try:
-            results["front"] = await engine.generate_front_cover(session, user, book_id)
-        except Exception:
-            results["front"] = {"error": "Front cover generation unsupported."}
+        results["front"] = await engine.generate_front_cover(session, user, book_id)
 
     if component in {"back", "all"}:
         await progress(50, "Generating back cover")
-        try:
-            results["back"] = await engine.generate_back_cover(session, user, book_id)
-        except Exception:
-            results["back"] = {"error": "Back cover generation unsupported."}
+        results["back"] = await engine.generate_back_cover(session, user, book_id)
 
     if component in {"spine", "all"}:
         await progress(80, "Generating spine")
-        try:
-            results["spine"] = await engine.generate_spine(session, user, book_id)
-        except Exception:
-            results["spine"] = {"error": "Spine generation unsupported."}
+        results["spine"] = await engine.generate_spine(session, user, book_id)
 
     await progress(100, "Cover complete")
     return results
@@ -173,8 +158,8 @@ async def _marketing_handler(
 ) -> dict[str, object] | None:
     """Generate a marketing asset for a book."""
     from models.enums import MarketingAssetType
-    from services.marketing.engine import get_marketing_engine
     from services.ai_service import AIService
+    from services.marketing.engine import get_marketing_engine
 
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
@@ -184,8 +169,8 @@ async def _marketing_handler(
     asset_type_str = str(payload.get("asset_type", "amazon_description"))
     try:
         asset_type = MarketingAssetType(asset_type_str)
-    except ValueError:
-        raise ValueError(f"Unsupported marketing asset type '{asset_type_str}'.")
+    except ValueError as error:
+        raise ValueError(f"Unsupported marketing asset type '{asset_type_str}'.") from error
 
     await progress(15, f"Generating {asset_type.value}")
     engine = get_marketing_engine(AIService())
@@ -205,16 +190,9 @@ async def _translation_handler(
     payload: dict[str, object],
     progress: ProgressCallback,
 ) -> dict[str, object] | None:
-    """Translate a book chapter-by-chapter with progress reporting."""
-    from sqlalchemy import select
-
-    from models.book_writing import WritingChapter
+    """Translate a source revision into a separate, resumable edition."""
     from services.ai_service import AIService
-    from services.translation.engine import (
-        SUPPORTED_LANGUAGES,
-        TRANSLATION_SYSTEM_PROMPT,
-        get_translation_engine,
-    )
+    from services.translation.engine import get_translation_engine
 
     user_id, book_id = _payload_user(payload)
     if not user_id or not book_id:
@@ -223,74 +201,25 @@ async def _translation_handler(
 
     source_lang = str(payload.get("source_lang", "en"))
     target_lang = str(payload.get("target_lang", "es"))
-    if source_lang not in SUPPORTED_LANGUAGES:
-        raise ValueError(f"Unsupported source language '{source_lang}'.")
-    if target_lang not in SUPPORTED_LANGUAGES:
-        raise ValueError(f"Unsupported target language '{target_lang}'.")
+    raw_translation_id = payload.get("translation_id")
+    translation_id = UUID(str(raw_translation_id)) if raw_translation_id else None
 
-    chapters_result = await session.execute(
-        select(WritingChapter)
-        .where(WritingChapter.book_id == book_id, WritingChapter.deleted_at.is_(None))
-        .order_by(WritingChapter.chapter_number)
+    edition = await get_translation_engine(AIService()).translate(
+        session,
+        user,
+        book_id,
+        source_lang,
+        target_lang,
+        translation_id=translation_id,
+        progress=progress,
     )
-    chapters = list(chapters_result.scalars())
-    total = len(chapters)
-    if total == 0:
-        raise ValueError("Cannot translate: book has no chapters.")
-
-    await progress(2, f"Translating {total} chapter(s) to {target_lang}")
-    source_label = SUPPORTED_LANGUAGES[source_lang]
-    target_label = SUPPORTED_LANGUAGES[target_lang]
-
-    ai = AIService()
-    for idx, chapter in enumerate(chapters, start=1):
-        content = chapter.content or ""
-        if content.strip():
-            chunks = _split_chunks(content, 3000)
-            parts: list[str] = []
-            for chunk in chunks:
-                r = await ai.generate_text(
-                    system_prompt=TRANSLATION_SYSTEM_PROMPT.format(
-                        source_lang=source_label,
-                        target_lang=target_label,
-                    ),
-                    user_prompt=chunk,
-                )
-                parts.append(r.text)
-            chapter.content = "\n\n".join(parts)
-            chapter.actual_word_count = len(chapter.content.split())
-
-        pct = 5 + int(90 * (idx / total))
-        await progress(pct, f"Translated chapter {idx} of {total}")
-
-    await session.commit()
-    await progress(100, "Translation complete")
     return {
-        "chapters_translated": total,
+        "translation_id": str(edition.id),
+        "chapters_translated": edition.translated_chapter_count,
         "source_lang": source_lang,
         "target_lang": target_lang,
+        "status": edition.status,
     }
-
-
-def _split_chunks(text: str, max_len: int) -> list[str]:
-    """Split text into chunks at paragraph boundaries, each under max_len."""
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    for para in paragraphs:
-        if current_len + len(para) > max_len and current:
-            chunks.append("\n\n".join(current))
-            current = [para]
-            current_len = len(para)
-        else:
-            current.append(para)
-            current_len += len(para) + 2
-
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks
 
 
 def register_all_handlers() -> None:

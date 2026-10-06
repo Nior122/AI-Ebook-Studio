@@ -93,8 +93,8 @@ const GUIDES = [
       "Select source and target languages (20+ supported).",
       "Click Translate — each chapter is translated sequentially.",
       "Markdown formatting (headings, bold, lists) and image placeholders are preserved.",
-      "The translated text replaces your current chapter content.",
-      "View translation history to track past translations.",
+      "A new translated edition is saved separately; your source chapters are not changed.",
+      "Open a saved edition, inspect per-chapter results, or resume an incomplete translation.",
     ],
   },
   {
@@ -141,7 +141,7 @@ const FAQ = [
   },
   {
     q: "How does translation work?",
-    a: "Translation processes each chapter sequentially via AI. Markdown formatting and image placeholders are preserved. The translated text replaces your current content — create a backup by exporting before translating.",
+    a: "Translation creates a separate edition linked to the source revision. The original chapters and book language remain unchanged. Completed chapters are saved independently, and an incomplete edition can be resumed while the source revision is unchanged.",
   },
   {
     q: "Is there a word count limit?",

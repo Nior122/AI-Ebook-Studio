@@ -21,7 +21,9 @@ class ExportResponse(BaseModel):
     """Response after a successful export."""
 
     id: UUID
-    book_id: UUID
+    book_id: UUID = Field(
+        description="Canonical project Book.id; the endpoint path accepts WritingBook.id."
+    )
     asset_type: str
     file_name: str
     file_url: str

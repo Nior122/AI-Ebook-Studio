@@ -67,19 +67,19 @@ async def _primary_book(session: AsyncSession, user: User, project: Project) -> 
 
 
 async def _writing_book(session: AsyncSession, user: User, project: Project) -> WritingBook | None:
-    """Resolve the WritingBook that belongs to this project (latest, title match first)."""
-    result = await session.execute(
-        select(WritingBook)
-        .where(WritingBook.user_id == user.id, WritingBook.deleted_at.is_(None))
-        .order_by(WritingBook.created_at.desc())
-    )
-    books = list(result.scalars())
-    if not books:
+    """Resolve this project's writing aggregate without a title-based guess."""
+    project_book = await _primary_book(session, user, project)
+    if project_book is None:
         return None
-    for book in books:
-        if book.title == project.title:
-            return book
-    return books[0]
+
+    result = await session.execute(
+        select(WritingBook).where(
+            WritingBook.project_book_id == project_book.id,
+            WritingBook.user_id == user.id,
+            WritingBook.deleted_at.is_(None),
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------------

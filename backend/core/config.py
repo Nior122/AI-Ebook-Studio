@@ -2,8 +2,20 @@
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PRODUCTION_SECRET_MIN_LENGTH = 32
+_PRODUCTION_PLACEHOLDERS = {
+    "change-me",
+    "change-me-too",
+    "changeme",
+    "default",
+    "password",
+    "replace-me",
+    "secret",
+    "your-secret-key",
+}
 
 
 class Settings(BaseSettings):
@@ -108,6 +120,7 @@ class Settings(BaseSettings):
         env_prefix="",
         extra="ignore",
         case_sensitive=False,
+        hide_input_in_errors=True,
     )
 
     @field_validator("cors_origins", mode="before")
@@ -117,6 +130,44 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        """Reject development security defaults when running in production."""
+        if self.app_env.strip().lower() not in {"prod", "production"}:
+            return self
+
+        errors: list[str] = []
+        secrets = {
+            "SECRET_KEY": self.secret_key,
+            "JWT_SECRET": self.jwt_secret,
+        }
+        for name, value in secrets.items():
+            normalized = value.strip().casefold()
+            if (
+                len(value.strip()) < _PRODUCTION_SECRET_MIN_LENGTH
+                or normalized in _PRODUCTION_PLACEHOLDERS
+                or len(set(normalized)) < 8
+            ):
+                errors.append(
+                    f"{name} must be a non-placeholder secret with at least "
+                    f"{_PRODUCTION_SECRET_MIN_LENGTH} characters"
+                )
+
+        if self.secret_key.strip() == self.jwt_secret.strip():
+            errors.append("SECRET_KEY and JWT_SECRET must be different values")
+        if self.debug:
+            errors.append("DEBUG must be false")
+
+        origins = [origin.strip() for origin in self.cors_origins]
+        if any(origin == "*" for origin in origins):
+            errors.append("CORS_ORIGINS must not include a wildcard origin")
+        if any(origin.lower().startswith("http://") for origin in origins):
+            errors.append("CORS_ORIGINS must use HTTPS in production")
+
+        if errors:
+            raise ValueError("Invalid production security configuration: " + "; ".join(errors))
+        return self
 
     @property
     def resolved_google_api_key(self) -> str | None:

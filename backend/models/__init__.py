@@ -21,23 +21,6 @@ from models.accounts import (
 )
 from models.ai_provider_config import AIProviderPreference
 from models.ai_usage import AIUsageRecord
-from models.custom_ai_provider import CustomAIProvider
-from models.book_writing import (
-    BookBlueprint,
-    BookBrief,
-    WritingBook,
-    WritingBookSettings,
-    WritingChapter,
-    ChapterVersion,
-    Manuscript,
-    WritingSession,
-)
-from models.editing import (
-    EditingSession,
-    EditingSuggestion,
-    ReviewJob,
-    SuggestionBatch,
-)
 from models.assets import (
     BookSettings,
     DocumentAsset,
@@ -46,7 +29,26 @@ from models.assets import (
     MarketingAsset,
     TranslationRecord,
 )
+from models.book_writing import (
+    BookBlueprint,
+    BookBrief,
+    ChapterVersion,
+    Manuscript,
+    TranslatedChapter,
+    WritingBook,
+    WritingBookSettings,
+    WritingBookTranslation,
+    WritingChapter,
+    WritingSession,
+)
+from models.custom_ai_provider import CustomAIProvider
 from models.document import Chapter, Paragraph, Part, Section, Sentence
+from models.editing import (
+    EditingSession,
+    EditingSuggestion,
+    ReviewJob,
+    SuggestionBatch,
+)
 from models.operations import ActivityLog, AuditLog, Job, Notification
 from models.project import Book, BookVersion, Folder, Project, ProjectSettings
 from models.studio import Bookmark, ProjectActivity, ProjectVersion, StudioNotification
@@ -101,6 +103,8 @@ __all__ = [
     "SuggestionBatch",
     "StudioNotification",
     "TranslationRecord",
+    "TranslatedChapter",
+    "WritingBookTranslation",
     "User",
     "UserRole",
     "WritingBook",

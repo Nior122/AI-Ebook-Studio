@@ -12,7 +12,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 from pydantic import BaseModel
-
 from sqlalchemy import select
 
 from api.dependencies import CurrentUser, DatabaseSession
@@ -24,10 +23,20 @@ from providers.ai.base import AIProviderError
 from schemas.book_setup import BookSetupRequest, BookSetupResponse
 from schemas.projects import BookCreateRequest
 from services import book_service as project_book_service
+from services.book_identity import (
+    get_owned_writing_book as _get_owned_writing_book,
+)
+from services.book_identity import (
+    require_project_book_id,
+)
 from services.book_writing.engine import BookWritingEngine
 from services.generation.pipeline import (
     get_generation_status,
+)
+from services.generation.pipeline import (
     regenerate_chapter as pipeline_regenerate_chapter,
+)
+from services.generation.pipeline import (
     validate_book as pipeline_validate_book,
 )
 from services.jobs import enqueue_and_schedule
@@ -118,12 +127,14 @@ async def start_book_generation(
     )
     wb_result = await session.execute(
         select(WritingBook).where(
+            WritingBook.project_book_id == book.id,
             WritingBook.user_id == user.id,
-            WritingBook.title == book.title,
             WritingBook.deleted_at.is_(None),
-        ).order_by(WritingBook.created_at.desc())
+        )
     )
-    wbook = wb_result.scalar()
+    wbook = wb_result.scalar_one_or_none()
+    if wbook is None:
+        raise ResourceNotFoundError("Writing book relationship could not be resolved.")
 
     handle = await enqueue_and_schedule(
         JobType.BOOK_GENERATION,
@@ -147,16 +158,6 @@ async def start_book_generation(
 # ---------------------------------------------------------------------------
 # Phase 6 repair — pipeline control endpoints
 # ---------------------------------------------------------------------------
-async def _get_owned_writing_book(
-    session: DatabaseSession, user: CurrentUser, book_id: UUID
-) -> WritingBook:
-    """Return a WritingBook owned by *user* or raise 404."""
-    wbook = await session.get(WritingBook, book_id)
-    if wbook is None or wbook.deleted_at is not None or wbook.user_id != user.id:
-        raise ResourceNotFoundError("Book not found.")
-    return wbook
-
-
 async def _stored_ai_options(session: DatabaseSession, book_id: UUID) -> dict[str, str | None]:
     """Provider/model stored on the book's writing settings, if any."""
     result = await session.execute(
@@ -190,35 +191,34 @@ async def resume_book_generation(
     """
     wbook = await _get_owned_writing_book(session, user, book_id)
 
-    book_result = await session.execute(
-        select(Book).where(Book.metadata_json["writing_book_id"].as_string() == str(wbook.id))
-    )
-    book = book_result.scalars().first()
+    project_book_id = require_project_book_id(wbook)
+    book = await session.get(Book, project_book_id)
+    if book is None:
+        raise ResourceNotFoundError("The linked project book was not found.")
 
     # Prefer the original setup payload from the most recent generation job so
     # layout/AI choices survive the resume.
     payload: dict[str, object] = {
         "user_id": str(user.id),
         "writing_book_id": str(wbook.id),
+        "book_id": str(book.id),
+        "project_id": str(book.project_id),
     }
-    if book is not None:
-        payload["book_id"] = str(book.id)
-        payload["project_id"] = str(book.project_id)
-        job_result = await session.execute(
-            select(Job)
-            .where(
-                Job.job_type == JobType.BOOK_GENERATION.value,
-                Job.user_id == user.id,
-                Job.book_id == book.id,
-            )
-            .order_by(Job.created_at.desc())
-            .limit(5)
+    job_result = await session.execute(
+        select(Job)
+        .where(
+            Job.job_type == JobType.BOOK_GENERATION.value,
+            Job.user_id == user.id,
+            Job.book_id == book.id,
         )
-        for job_row in job_result.scalars():
-            stored = (job_row.payload or {}).get("setup")
-            if stored:
-                payload["setup"] = stored
-                break
+        .order_by(Job.created_at.desc())
+        .limit(5)
+    )
+    for job_row in job_result.scalars():
+        stored = (job_row.payload or {}).get("setup")
+        if stored:
+            payload["setup"] = stored
+            break
 
     handle = await enqueue_and_schedule(JobType.BOOK_GENERATION, payload)
     return {

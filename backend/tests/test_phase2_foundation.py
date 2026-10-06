@@ -9,8 +9,10 @@ real behavior tests (no always-pass assertions).
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -69,6 +71,73 @@ def test_settings_parse_cors_from_string() -> None:
     """CORS origins parse from a comma-separated string."""
     settings = Settings(cors_origins="http://a.com, http://b.com")
     assert settings.cors_origins == ["http://a.com", "http://b.com"]
+
+
+def test_production_settings_accept_secure_configuration() -> None:
+    """Production accepts distinct strong keys, disabled debug, and HTTPS CORS."""
+    settings = Settings(
+        _env_file=None,
+        app_env="PRODUCTION",
+        debug=False,
+        secret_key="AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production",
+        jwt_secret="JwtEncryptionKey-3aMn!Qv8bT2xR7sL2026-Production",
+        cors_origins=["https://studio.example.com"],
+    )
+    assert settings.app_env == "PRODUCTION"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"secret_key": "change-me"}, "SECRET_KEY"),
+        ({"jwt_secret": "too-short"}, "JWT_SECRET"),
+        ({"jwt_secret": "AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production"}, "different values"),
+        ({"debug": True}, "DEBUG must be false"),
+        ({"cors_origins": ["*"]}, "wildcard origin"),
+        ({"cors_origins": ["http://studio.example.com"]}, "HTTPS"),
+    ],
+)
+def test_production_settings_reject_unsafe_configuration(
+    overrides: dict[str, object], expected_error: str
+) -> None:
+    """Known defaults, weak keys, debug, and unsafe CORS fail closed in prod."""
+    config: dict[str, object] = {
+        "_env_file": None,
+        "app_env": "production",
+        "debug": False,
+        "secret_key": "AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production",
+        "jwt_secret": "JwtEncryptionKey-3aMn!Qv8bT2xR7sL2026-Production",
+        "cors_origins": ["https://studio.example.com"],
+    }
+    config.update(overrides)
+
+    with pytest.raises(ValueError) as error:
+        Settings(**config)
+    assert expected_error in str(error.value)
+    assert config["secret_key"] not in str(error.value)
+    assert config["jwt_secret"] not in str(error.value)
+
+
+def test_render_blueprint_uses_production_safe_settings() -> None:
+    """The checked-in Render blueprint satisfies the production config contract."""
+    render_path = Path(__file__).resolve().parents[2] / "render.yaml"
+    service = yaml.safe_load(render_path.read_text())["services"][0]
+    env = {entry["key"]: entry for entry in service["envVars"]}
+
+    assert env["SECRET_KEY"]["generateValue"] is True
+    assert env["JWT_SECRET"]["generateValue"] is True
+    assert env["APP_ENV"]["value"] == "production"
+    assert str(env["DEBUG"]["value"]).lower() == "false"
+
+    settings = Settings(
+        _env_file=None,
+        app_env=env["APP_ENV"]["value"],
+        debug=env["DEBUG"]["value"],
+        cors_origins=env["CORS_ORIGINS"]["value"],
+        secret_key="Production-Secret-Key-Generated-Randomly-2026-91a7!zC",
+        jwt_secret="Different-JWT-Encryption-Secret-Generated-2026-6b2d!yQ",
+    )
+    assert settings.cors_origins == ["https://ai-ebook-studio.pages.dev"]
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class KDPCheckItem(BaseModel):
@@ -20,7 +20,9 @@ class KDPValidationReportResponse(BaseModel):
     """KDP validation report response."""
 
     id: UUID
-    book_id: UUID
+    book_id: UUID = Field(
+        description="Canonical project Book.id; the endpoint path accepts WritingBook.id."
+    )
     status: str
     score: int
     issues: list[dict[str, object]]

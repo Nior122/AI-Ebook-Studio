@@ -28,13 +28,14 @@ from models.book_writing import (
 )
 from services.generation.pipeline import (
     GenerationPipeline,
+    _allocate_chapter_word_targets,
     _audit_passed,
     _clamp_score,
+    _front_matter_word_target,
     _normalize_validation,
     is_conclusion_title,
     regenerate_chapter,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,7 +89,6 @@ class FakeEngine:
 
     async def generate_specification(self, setup: dict[str, Any], **_: Any) -> dict[str, Any]:
         self._count("generate_specification")
-        details = setup.get("details", {}) or {}
         return {
             "book_title": "AI Tools for Teachers",
             "subtitle": "A Practical Classroom Guide",
@@ -139,9 +139,21 @@ class FakeEngine:
         self._count("generate_chapter_outline_from_spec")
         return {
             "sections": [
-                {"title": "Why this matters", "purpose": "Frame the problem.", "key_points": ["context"]},
-                {"title": "The core method", "purpose": "Teach the method.", "key_points": ["steps"]},
-                {"title": "Classroom application", "purpose": "Apply it.", "key_points": ["example"]},
+                {
+                    "title": "Why this matters",
+                    "purpose": "Frame the problem.",
+                    "key_points": ["context"],
+                },
+                {
+                    "title": "The core method",
+                    "purpose": "Teach the method.",
+                    "key_points": ["steps"],
+                },
+                {
+                    "title": "Classroom application",
+                    "purpose": "Apply it.",
+                    "key_points": ["example"],
+                },
             ]
         }
 
@@ -156,7 +168,8 @@ class FakeEngine:
         self._count("generate_chapter_section")
         self.section_specs.append(dict(spec))
         title = sections[index].get("title", "") if index < len(sections) else ""
-        return f"## {title}\n\n{_text(136)}"
+        target = int(_.get("section_word_target") or 136)
+        return f"## {title}\n\n{_text(target)}"
 
     async def validate_chapter(
         self,
@@ -204,19 +217,19 @@ class FakeEngine:
     ) -> str:
         self._count("revise_chapter")
         self.revise_calls += 1
-        return content + "\n\n" + _text(136)
+        return content + "\n\n" + _text(34)
 
     async def generate_introduction(
-        self, spec: dict[str, Any], summaries: list[dict[str, Any]], **_: Any
+        self, spec: dict[str, Any], summaries: list[dict[str, Any]], **kwargs: Any
     ) -> str:
         self._count("generate_introduction")
-        return f"# Welcome\n\n{_text(100)}"
+        return f"# Welcome\n\n{_text(int(kwargs.get('target_word_count') or 100))}"
 
     async def generate_conclusion(
-        self, spec: dict[str, Any], summaries: list[dict[str, Any]], **_: Any
+        self, spec: dict[str, Any], summaries: list[dict[str, Any]], **kwargs: Any
     ) -> str:
         self._count("generate_conclusion")
-        return f"# The Road Ahead\n\n{_text(90)}"
+        return f"# The Road Ahead\n\n{_text(int(kwargs.get('target_word_count') or 90))}"
 
     async def validate_manuscript(
         self,
@@ -279,6 +292,18 @@ async def _run_pipeline(session: Any, engine: FakeEngine, user_id: UUID, wbook: 
 # ---------------------------------------------------------------------------
 # Pure-function coverage
 # ---------------------------------------------------------------------------
+def test_word_budget_allocates_front_matter_without_exceeding_total() -> None:
+    target = 3000
+    front_matter = _front_matter_word_target(target)
+    body_targets = _allocate_chapter_word_targets(
+        [{"estimated_word_count": 500} for _ in range(3)], target
+    )
+
+    assert front_matter == 180
+    assert body_targets == [880, 880, 880]
+    assert 2 * front_matter + sum(body_targets) == target
+
+
 def test_clamp_score_variants() -> None:
     assert _clamp_score(None) is None
     assert _clamp_score(True) == 100
@@ -331,13 +356,23 @@ def test_normalize_validation_reports_usable_scores() -> None:
     assert _audit_passed(harsh, _normalize_validation(harsh, 500), 500, 1000) is False
 
 
-def test_audit_passed_gates_only_scored_dimensions() -> None:
-    validation = {"relevance_score": 85, "outline_coverage": None}
-    usable = _normalize_validation(validation, 700)
-    # outline_coverage was never scored — it must not fail the chapter.
-    assert _audit_passed(validation, usable, 700, 1000) is True
-    # But the word-count floor still applies.
-    assert _audit_passed(validation, usable, 100, 1000) is False
+def test_audit_requires_complete_scores_and_word_count_within_tolerance() -> None:
+    partial = {"relevance_score": 85, "outline_coverage": None}
+    usable = _normalize_validation(partial, 900)
+    # Missing semantic dimensions cannot silently count as a successful audit.
+    assert _audit_passed(partial, usable, 900, 1000) is False
+
+    complete = {
+        "relevance_score": 85,
+        "outline_coverage": 80,
+        "depth_score": 75,
+        "continuity_score": 70,
+    }
+    usable = _normalize_validation(complete, 800)
+    assert _audit_passed(complete, usable, 800, 1000) is True
+    # The chapter must stay within the full 80–120% target range.
+    assert _audit_passed(complete, usable, 799, 1000) is False
+    assert _audit_passed(complete, usable, 1201, 1000) is False
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +446,11 @@ async def test_full_pipeline_happy_path(db_session: Any) -> None:
     assert report["introduction_written"] is True
     assert report["conclusion_written"] is True
     assert report["failed_or_review_chapters"] == []
+    assert report["word_count_within_target"] is True
+    assert report["manuscript_complete"] is True
+    assert report["chapter_validations_complete"] is True
+    assert report["minimum_acceptable_word_count"] <= report["total_word_count"]
+    assert report["total_word_count"] <= report["maximum_acceptable_word_count"]
     assert report["ai_quality_report"]["overall_score"] == 88
     assert wbook.status == "ready_for_formatting"
 
@@ -461,8 +501,8 @@ async def test_pipeline_auto_revises_failing_chapter(db_session: Any) -> None:
         assert ch.actual_word_count >= 500  # revised content appended
 
 
-async def test_pipeline_accepts_chapter_when_validation_unavailable(db_session: Any) -> None:
-    """A malformed audit must not burn revisions or block the book."""
+async def test_pipeline_flags_chapter_when_validation_unavailable(db_session: Any) -> None:
+    """An unavailable semantic audit keeps the draft but requires human review."""
     user, wbook = await _make_book(db_session)
     engine = FakeEngine(validation_mode="unavailable")
 
@@ -482,10 +522,12 @@ async def test_pipeline_accepts_chapter_when_validation_unavailable(db_session: 
         .all()
     )
     for ch in body:
-        assert ch.status == "draft"
+        assert ch.status == "needs_review"
         assert ch.validation_result["validation_unavailable"] is True
-        assert ch.validation_result["passed"] is True
+        assert ch.validation_result["passed"] is False
         assert ch.content  # content preserved as-is
+    assert summary["status"] == "needs_review"
+    assert wbook.quality_report["chapter_validations_complete"] is False
 
 
 async def test_pipeline_resume_skips_completed_stages(db_session: Any) -> None:
@@ -524,15 +566,6 @@ async def test_regenerate_single_chapter(db_session: Any) -> None:
     engine = FakeEngine(validation_mode="pass")
     await _run_pipeline(db_session, engine, user.id, wbook)
     sections_before = engine.calls["generate_chapter_section"]
-
-    target = (
-        await db_session.execute(
-            select(WritingChapter).where(
-                WritingChapter.book_id == wbook.id,
-                WritingChapter.chapter_number == 2,
-            )
-        )
-    ).scalar_one()
 
     rewritten = await regenerate_chapter(
         db_session,
@@ -626,3 +659,20 @@ async def test_pipeline_filters_reserved_back_matter_from_blueprint(db_session: 
     assert not any("Why AI Now" in t for t in titles), titles
     assert not any("Embracing AI" in t for t in titles), titles
     assert sum(1 for t in titles if is_conclusion_title(t)) == 1
+
+
+async def test_pipeline_rejects_incomplete_blueprint(db_session: Any) -> None:
+    """A short blueprint must not become a falsely complete book."""
+    user, wbook = await _make_book(db_session)
+    engine = FakeEngine(validation_mode="pass")
+    original_blueprint = FakeEngine.generate_blueprint_from_spec
+
+    async def incomplete_blueprint(self, spec, **kwargs):
+        payload = await original_blueprint(self, spec, **kwargs)
+        payload["chapters"] = payload["chapters"][:2]
+        return payload
+
+    engine.generate_blueprint_from_spec = incomplete_blueprint.__get__(engine)
+
+    with pytest.raises(RuntimeError, match="returned 2 of 3 requested chapters"):
+        await _run_pipeline(db_session, engine, user.id, wbook)

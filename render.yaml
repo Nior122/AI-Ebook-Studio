@@ -46,7 +46,7 @@ services:
         sync: false
       # --- CORS: allow the Cloudflare-hosted frontend ---
       - key: CORS_ORIGINS
-        value: https://ai-ebook-studio.pages.dev,http://localhost:3000
+        value: https://ai-ebook-studio.pages.dev
       # --- Emails (password reset / verification) ---
       - key: APP_BASE_URL
         value: https://ai-ebook-studio.pages.dev

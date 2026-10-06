@@ -12,8 +12,8 @@ Creating a primary book is an atomic transaction that creates:
 * a default ``bw_chapters`` Chapter 1,
 * a ``bw_book_settings`` record so the editor has formatting defaults,
 * the ``bw_books.manuscript`` aggregate row,
-* and persists ``metadata_json.writing_book_id`` so all module pages can
-  resolve the engine immediately.
+* and links the aggregates through ``WritingBook.project_book_id``. The
+  reciprocal ``metadata_json.writing_book_id`` remains for client compatibility.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.exceptions import ResourceNotFoundError
 from models.accounts import User
 from models.book_writing import (
-    BookBrief,
     BookBlueprint,
+    BookBrief,
     Manuscript,
     WritingBook,
     WritingBookSettings,
@@ -93,8 +93,9 @@ async def create_primary_book(
     6. Manuscript aggregate
     7. BookSettings (formatting defaults)
 
-    If any step fails, the whole transaction rolls back. The response Book
-    has ``metadata_json.writing_book_id`` populated so all modules resolve.
+    If any step fails, the whole transaction rolls back. The direct
+    ``WritingBook.project_book_id`` foreign key is canonical; the reciprocal
+    ``metadata_json.writing_book_id`` value remains for existing clients.
     """
     await require_workspace_permission(session, user, project.workspace_id, "project:update")
 
@@ -128,6 +129,7 @@ async def create_primary_book(
         language=payload.language or "en",
         status="draft",
         current_step="idea",
+        project_book_id=book.id,
     )
     session.add(wbook)
     try:
@@ -136,7 +138,7 @@ async def create_primary_book(
         await session.rollback()
         raise
 
-    # Persist the link into metadata_json so the frontend can resolve it.
+    # Keep the reciprocal metadata value for existing frontend clients.
     book.metadata_json = {"writing_book_id": str(wbook.id)}
 
     # 3. BookBrief placeholder.

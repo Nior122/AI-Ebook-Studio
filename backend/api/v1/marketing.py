@@ -79,4 +79,4 @@ async def delete_marketing(
 ) -> None:
     """Delete a generated marketing asset."""
     engine = get_marketing_engine(ai_service)
-    await engine.delete_asset(session, user, asset_id)
+    await engine.delete_asset(session, user, asset_id, book_id)

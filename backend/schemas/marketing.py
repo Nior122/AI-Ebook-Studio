@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MarketingAssetTypeInfo(BaseModel):
@@ -20,7 +20,9 @@ class MarketingAssetResponse(BaseModel):
     """Marketing asset response."""
 
     id: UUID
-    book_id: UUID
+    book_id: UUID = Field(
+        description="Canonical project Book.id; the endpoint path accepts WritingBook.id."
+    )
     asset_type: str
     content: str
     created_at: datetime
