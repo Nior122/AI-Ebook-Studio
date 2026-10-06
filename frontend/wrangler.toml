@@ -2,7 +2,8 @@
 #
 # This app deploys through @opennextjs/cloudflare:
 #   - `npm run build`  -> runs `opennextjs-cloudflare build`, producing the
-#                         worker bundle at .open-next/worker.js
+#                         worker bundle at .open-next/worker.js; the OpenNext
+#                         config delegates its nested Next build to build:next.
 #   - `wrangler deploy`-> uploads that bundle as the "ai-ebook-studio" worker
 #
 # Cloudflare dashboard (Workers & Pages -> Workers -> Workers Builds,
@@ -13,12 +14,22 @@
 #   Deploy command:      npx wrangler deploy
 #   Production branch:   master       <-- the repo's default branch is master
 #
-# Environment variables (add under Settings -> Variables & Secrets):
+# Environment variables (add as both build variables and Worker runtime vars):
 #   NEXT_PUBLIC_API_BASE_URL            -> https://<backend>.onrender.com/api/v1
+#   BACKEND_URL                         -> https://<backend>.onrender.com (optional
+#                                         when the public API base URL is set)
 #   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-#   CLERK_SECRET_KEY
+#   CLERK_SECRET_KEY (secret; never put its value in this file)
 
 name = "ai-ebook-studio"
 main = ".open-next/worker.js"
 compatibility_date = "2026-07-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+# OpenNext serves Next.js and public files through the ASSETS binding.
+assets = { directory = ".open-next/assets", binding = "ASSETS" }
+
+# Required by OpenNext for worker self-invocation (for example, revalidation).
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "ai-ebook-studio"

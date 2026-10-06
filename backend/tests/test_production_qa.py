@@ -17,22 +17,31 @@ Covers the remaining checklist flows on top of test_studio_flow.py:
 from __future__ import annotations
 
 import os
-import re
 import urllib.parse
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event, text
 
 from app.main import app
 from core.config import get_settings
 from database.base import Base
 from database.session import AsyncSessionLocal, dispose_engine
+from database.session import engine as database_engine
+from models.operations import Job
 from services.auth_service import create_auth_flow_token
 from services.jobs.handlers import register_all_handlers
 
 TEST_DB = "./var/test_studio.db"
+
+
+def _enable_sqlite_foreign_keys(dbapi_connection: Any, _connection_record: Any) -> None:
+    """Make the persistent SQLite QA database enforce PostgreSQL-like FKs."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 def _setup_payload(**overrides: Any) -> dict[str, Any]:
@@ -49,6 +58,10 @@ def _setup_payload(**overrides: Any) -> dict[str, Any]:
             "book_purpose": "Help engineers ship dependable systems",
         },
         "size": {"total_word_count": 3000, "custom": False, "chapters_override": 3},
+        "layout": {
+            "page_size": "8x10",
+            "margins": {"top": 1.0, "bottom": 1.0, "left": 1.25, "right": 1.25},
+        },
         "ai": {"provider": "openrouter", "model": "openai/gpt-4o-mini", "creativity": "balanced"},
         "special_instructions": {"instructions": "Be precise and practical."},
     }
@@ -64,19 +77,30 @@ def _setup_payload(**overrides: Any) -> dict[str, Any]:
 async def qa_client() -> Any:
     if os.path.exists(TEST_DB):
         os.remove(TEST_DB)
-    async with AsyncSessionLocal() as session:
-        await session.run_sync(lambda sync: Base.metadata.create_all(sync.bind))
-    register_all_handlers()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
-    await dispose_engine()
+    enforce_sqlite_fks = database_engine.dialect.name == "sqlite"
+    if enforce_sqlite_fks:
+        event.listen(database_engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
     try:
-        if os.path.exists(TEST_DB):
-            os.remove(TEST_DB)
-    except PermissionError:
-        # Windows: a lingering job-runner connection may still hold the file.
-        pass
+        async with AsyncSessionLocal() as session:
+            await session.run_sync(lambda sync: Base.metadata.create_all(sync.bind))
+        register_all_handlers()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"X-Forwarded-For": str(uuid4())},
+        ) as client:
+            yield client
+    finally:
+        await dispose_engine()
+        if enforce_sqlite_fks:
+            event.remove(database_engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
+        try:
+            if os.path.exists(TEST_DB):
+                os.remove(TEST_DB)
+        except PermissionError:
+            # Windows: a lingering job-runner connection may still hold the file.
+            pass
 
 
 async def _register(client: AsyncClient, email: str) -> dict[str, str]:
@@ -93,13 +117,18 @@ async def _register(client: AsyncClient, email: str) -> dict[str, str]:
     }
 
 
-async def _wait_job(client: AsyncClient, token: str, job_id: str, timeout: float = 150.0) -> dict[str, Any]:
+async def _wait_job(
+    client: AsyncClient, token: str, job_id: str, timeout: float = 150.0
+) -> dict[str, Any]:
     import asyncio
 
     deadline = asyncio.get_event_loop().time() + timeout
     last: dict[str, Any] = {}
     while asyncio.get_event_loop().time() < deadline:
-        response = await client.get(f"/api/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {token}"})
+        response = await client.get(
+            f"/api/v1/jobs/{job_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert response.status_code == 200, response.text
         last = response.json()
         if last["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
@@ -224,23 +253,79 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
     headers = account["headers"]
 
     # --- Generate ---
-    response = await qa_client.post("/api/v1/generation/setup", json=_setup_payload(), headers=headers)
+    response = await qa_client.post(
+        "/api/v1/generation/setup",
+        json=_setup_payload(),
+        headers=headers,
+    )
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["project_id"] and body["job_id"] and body["writing_book_id"]
-    project_id, writing_book_id = body["project_id"], body["writing_book_id"]
+    project_id = body["project_id"]
+    project_book_id = body["book_id"]
+    writing_book_id = body["writing_book_id"]
+    assert project_book_id and writing_book_id
+    assert project_book_id != writing_book_id
+    if database_engine.dialect.name == "sqlite":
+        async with AsyncSessionLocal() as session:
+            foreign_keys = await session.execute(text("PRAGMA foreign_keys"))
+            assert foreign_keys.scalar_one() == 1
     # Multi-stage generation (spec → blueprint → outlines → sections →
     # validation per chapter) legitimately takes several minutes on a real
     # provider.
     job = await _wait_job(qa_client, account["token"], body["job_id"], timeout=900.0)
     assert job["status"] == "COMPLETED", job
+    async with AsyncSessionLocal() as session:
+        persisted_job = await session.get(Job, UUID(body["job_id"]))
+        assert persisted_job is not None
+        assert str(persisted_job.book_id) == project_book_id
+
+    format_settings = await qa_client.get(
+        f"/api/v1/books/{project_book_id}/settings", headers=headers
+    )
+    assert format_settings.status_code == 200, format_settings.text
+    assert format_settings.json()["kdp_trim_size"] == "8x10"
+    assert format_settings.json()["margin_left"] == 1.25
 
     response = await qa_client.get(
         f"/api/v1/book-writing/books/{writing_book_id}/chapters", headers=headers
     )
     chapters = response.json()
-    assert len(chapters) >= 3
+    body_chapters = [
+        chapter for chapter in chapters
+        if chapter["chapter_number"] > 0 and chapter["title"].lower() != "conclusion"
+    ]
+    assert len(body_chapters) == 3
+    assert all(chapter["content"].strip() for chapter in body_chapters)
+    manuscript_text = "\n".join(chapter["content"] for chapter in chapters).lower()
+    total_words = sum(chapter["actual_word_count"] for chapter in chapters)
+    # This assertion specifically guards the reproduced 24,038-word result
+    # for a 3,000-word request; content quantity is measured from persisted text.
+    chapter_lengths = [
+        (c["chapter_number"], c["title"], c["actual_word_count"], c["target_word_count"])
+        for c in chapters
+    ]
+    assert 2400 <= total_words <= 3600, (total_words, chapter_lengths)
+    assert "production" in manuscript_text or "software systems" in manuscript_text
+    assert "the book starts with a clear map" not in manuscript_text
     chapter_id = chapters[0]["id"]
+
+    kdp_response = await qa_client.post(
+        f"/api/v1/book-writing/books/{writing_book_id}/validate-kdp",
+        headers=headers,
+    )
+    assert kdp_response.status_code == 200, kdp_response.text
+    kdp_report = kdp_response.json()
+    assert kdp_report["book_id"] == project_book_id
+    assert any(
+        check["check"] == "page_size" and "8x10" in check["message"]
+        for check in kdp_report["passed_checks"]
+    ), kdp_report
+    latest_kdp_report = await qa_client.get(
+        f"/api/v1/book-writing/books/{writing_book_id}/validate-kdp", headers=headers
+    )
+    assert latest_kdp_report.status_code == 200, latest_kdp_report.text
+    assert latest_kdp_report.json()["id"] == kdp_report["id"]
 
     # --- Proofread (editing review) ---
     response = await qa_client.post(
@@ -269,8 +354,28 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
         f"/api/v1/async/books/{writing_book_id}/marketing/AMAZON_DESCRIPTION", headers=headers
     )
     assert response.status_code == 202, response.text
-    marketing_job = await _wait_job(qa_client, account["token"], response.json()["id"])
+    marketing_job_id = response.json()["id"]
+    marketing_job = await _wait_job(qa_client, account["token"], marketing_job_id)
     assert marketing_job["status"] == "COMPLETED", marketing_job
+    async with AsyncSessionLocal() as session:
+        persisted_marketing_job = await session.get(Job, UUID(marketing_job_id))
+        assert persisted_marketing_job is not None
+        assert str(persisted_marketing_job.book_id) == project_book_id
+    marketing_assets = await qa_client.get(
+        f"/api/v1/book-writing/books/{writing_book_id}/marketing", headers=headers
+    )
+    assert marketing_assets.status_code == 200, marketing_assets.text
+    assert marketing_assets.json()["items"]
+    assert all(
+        asset["book_id"] == project_book_id
+        for asset in marketing_assets.json()["items"]
+    )
+    marketing_asset_id = marketing_assets.json()["items"][0]["id"]
+    wrong_book_delete = await qa_client.delete(
+        f"/api/v1/book-writing/books/{uuid4()}/marketing/{marketing_asset_id}",
+        headers=headers,
+    )
+    assert wrong_book_delete.status_code == 404
 
     # --- Translation: graceful without a key (clear actionable error) ---
     response = await qa_client.post(
@@ -281,7 +386,9 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
     assert response.status_code == 202, response.text
     # Full books translate chapter-by-chapter through the AI provider; a
     # substantive manuscript takes a few minutes.
-    translation_job = await _wait_job(qa_client, account["token"], response.json()["id"], timeout=420.0)
+    translation_job = await _wait_job(
+        qa_client, account["token"], response.json()["id"], timeout=420.0
+    )
     if translation_job["status"] == "FAILED":
         message = translation_job.get("error_message") or ""
         assert "provider key" in message or "LibreTranslate" in message, message
@@ -298,19 +405,54 @@ async def test_full_book_workflow_with_jobs(qa_client: AsyncClient) -> None:
         export_job = await _wait_job(qa_client, account["token"], response.json()["id"])
         assert export_job["status"] == "COMPLETED", export_job
 
-    produced = []
-    for root, _, files in os.walk(storage_root):
-        for name in files:
-            if name.endswith((".docx", ".pdf", ".epub")):
-                produced.append(name)
+    listed_exports = await qa_client.get(
+        f"/api/v1/book-writing/books/{writing_book_id}/exports", headers=headers
+    )
+    assert listed_exports.status_code == 200, listed_exports.text
+    export_assets = listed_exports.json()["items"]
+    assert len(export_assets) == 3
+    assert all(asset["book_id"] == project_book_id for asset in export_assets)
+    docx_asset = next(asset for asset in export_assets if asset["asset_type"] == "DOCX")
+    downloaded = await qa_client.get(
+        f"/api/v1/book-writing/books/{writing_book_id}/exports/{docx_asset['id']}",
+        headers=headers,
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content.startswith(b"PK")
+    wrong_book_download = await qa_client.get(
+        f"/api/v1/book-writing/books/{uuid4()}/exports/{docx_asset['id']}",
+        headers=headers,
+    )
+    assert wrong_book_download.status_code == 404
+
+    book_export_root = os.path.join(storage_root, "exports", writing_book_id)
+    produced = os.listdir(book_export_root)
     assert any(name.endswith(".docx") for name in produced), produced
     assert any(name.endswith(".pdf") for name in produced), produced
     assert any(name.endswith(".epub") for name in produced), produced
 
+    docx_path = os.path.join(
+        book_export_root,
+        next(name for name in produced if name.endswith(".docx")),
+    )
+    from docx import Document
+
+    docx = Document(docx_path)
+    section = docx.sections[0]
+    assert section.page_width.inches == pytest.approx(8.0, abs=0.01)
+    assert section.page_height.inches == pytest.approx(10.0, abs=0.01)
+    assert section.left_margin.inches == pytest.approx(1.25, abs=0.01)
+
     # --- Jobs history now lists everything ---
     response = await qa_client.get("/api/v1/jobs", headers=headers)
     job_types = {job["job_type"] for job in response.json()}
-    assert {"BOOK_GENERATION", "COVER_GENERATION", "DOCX_BUILD", "PDF_EXPORT", "EPUB_EXPORT"} <= job_types
+    assert {
+        "BOOK_GENERATION",
+        "COVER_GENERATION",
+        "DOCX_BUILD",
+        "PDF_EXPORT",
+        "EPUB_EXPORT",
+    } <= job_types
 
 
 async def test_auth_rate_limiting(qa_client: AsyncClient) -> None:

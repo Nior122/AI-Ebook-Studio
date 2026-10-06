@@ -79,7 +79,7 @@ async def download_export(
 ) -> StreamingResponse:
     """Download a previously generated export file."""
     engine = get_export_engine()
-    asset = await engine.get_export(session, user, asset_id)
+    asset = await engine.get_export(session, user, asset_id, book_id)
     storage = get_storage_provider()
     file_bytes = await storage.get(asset.storage_key)
 
@@ -107,4 +107,4 @@ async def delete_export(
 ) -> None:
     """Delete a previously generated export file."""
     engine = get_export_engine()
-    await engine.delete_export(session, user, asset_id)
+    await engine.delete_export(session, user, asset_id, book_id)

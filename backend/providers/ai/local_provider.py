@@ -1,22 +1,19 @@
-"""Local deterministic AI provider — the zero-key offline engine.
+"""Local deterministic fallback provider for no-key/offline development.
 
-When no external API keys are configured, this provider keeps the whole
-platform functional end-to-end:
+This provider can create topic-anchored starter drafts, simple outlines,
+proofreading suggestions, marketing-copy sketches, design briefs, and basic
+text transforms. It is not a substitute for an LLM: semantic chapter and
+manuscript validation is explicitly unavailable, and offline-generated books
+remain in ``needs_review`` rather than being presented as publication-ready.
+Translation can use a configured LibreTranslate server; this module does not
+contact a public translation service implicitly.
 
-* Book brief / blueprint / chapter generation (structured JSON + real prose)
-* Proofreading suggestions (deterministic language heuristics)
-* Marketing copy (template-based, topic-aware)
-* Cover design briefs (template-based)
-* Assistant chat / edit actions (deterministic transforms)
-* Translation via the free LibreTranslate public endpoint (no key)
-
-It is clearly labelled as the "Local engine" in the UI and is always the last
-fallback, so real LLMs take over the moment a key is configured.
+The UI labels this provider as the Local engine. It remains a provider-level
+fallback, so configured LLM providers are used whenever available.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -86,6 +83,509 @@ def _topic_words(text: str, limit: int = 5) -> list[str]:
 
 def _word_count(text: str) -> int:
     return len(re.findall(r"\S+", text or ""))
+
+
+def _line_value(text: str, label: str, fallback: str = "") -> str:
+    """Read a single ``Label: value`` line without consuming adjacent fields."""
+    match = re.search(
+        rf"(?im)^\s*{re.escape(label)}\s*:\s*([^\r\n]*)",
+        text,
+    )
+    value = match.group(1).strip() if match else ""
+    return value or fallback
+
+
+def _line_int(text: str, *labels: str, fallback: int = 0) -> int:
+    for label in labels:
+        value = _line_value(text, label)
+        match = re.search(r"\d[\d,]*", value)
+        if match:
+            return int(match.group(0).replace(",", ""))
+    return fallback
+
+
+def _line_items(text: str, label: str) -> list[str]:
+    value = _line_value(text, label)
+    return [part.strip(" .;-") for part in value.split(";") if part.strip(" .;-")]
+
+
+def _unique(items: list[str]) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = item.strip()
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            found.append(cleaned)
+    return found
+
+
+def _compact_focus(value: str, limit: int = 7) -> str:
+    """Create concise labels for deterministic outlines without losing topic anchors."""
+    cleaned = re.sub(
+        r"^(?:core principles of|a practical workflow for|common challenges in|applying|"
+        r"building|practical methods for)\s+",
+        "",
+        value.strip(),
+        flags=re.IGNORECASE,
+    )
+    words = cleaned.split()
+    return " ".join(words[:limit]) or value.strip()
+
+
+def _setup_key_topics(topic: str, purpose: str) -> list[str]:
+    """Derive bounded topic anchors when a no-key setup has no model to do so."""
+    fragments = [
+        part.strip(" .:-")
+        for part in re.split(r"[;,]|\band\b", f"{topic};{purpose}", flags=re.IGNORECASE)
+        if part.strip(" .:-")
+    ]
+    fragments = [
+        re.sub(
+            r"^(?:practical ways to|ways to|how to|a guide to|a practical guide to)\s+",
+            "",
+            p,
+            flags=re.I,
+        )
+        for p in fragments
+    ]
+    fragments = _unique(fragments)
+    if len(fragments) >= 3:
+        return fragments[:8]
+
+    subject = topic.strip().rstrip(".") or "the subject"
+    return _unique(
+        fragments
+        + [
+            f"Core principles of {subject}",
+            f"Practical methods for {subject}",
+            f"Common challenges in {subject}",
+            f"Evaluating results in {subject}",
+            f"Sustaining progress with {subject}",
+        ]
+    )[:8]
+
+
+def _specification_from_prompt(user_prompt: str) -> dict[str, Any]:
+    title = _line_value(user_prompt, "Title", "Untitled book")
+    topic = _line_value(user_prompt, "Topic", title)
+    audience = _line_value(user_prompt, "Target audience", "general readers")
+    purpose = _line_value(user_prompt, "Book purpose", "")
+    words = _line_int(user_prompt, "Requested total word count", fallback=10000)
+    requested_chapters = _line_value(user_prompt, "Requested chapter count")
+    chapter_match = re.search(r"\d+", requested_chapters)
+    if chapter_match:
+        chapters = int(chapter_match.group(0))
+    elif words <= 10000:
+        chapters = 8
+    elif words <= 25000:
+        chapters = 10
+    else:
+        chapters = 14
+
+    promise = purpose or f"Help {audience} make practical progress with {topic}."
+    return {
+        "book_title": title,
+        "subtitle": _line_value(user_prompt, "Subtitle"),
+        "topic": topic,
+        "description": purpose or topic,
+        "target_audience": audience,
+        "book_type": "practical guide",
+        "language": _line_value(user_prompt, "Language", "en"),
+        "tone": _line_value(user_prompt, "Tone", "clear and practical"),
+        "main_promise": promise,
+        "reader_problem": f"{audience} need a clear, reliable way to approach {topic}.",
+        "reader_transformation": (
+            f"Move from uncertainty to confident, repeatable practice in {topic}."
+        ),
+        "key_topics": _setup_key_topics(topic, purpose),
+        "required_topics": _setup_key_topics(topic, purpose)[:4],
+        "excluded_topics": [],
+        "chapter_count": chapters,
+        "target_word_count": words,
+        "writing_style": _line_value(user_prompt, "Writing style", "clear, specific nonfiction"),
+        "difficulty_level": _line_value(user_prompt, "Reading level", "general"),
+        "practical_focus": _line_value(
+            user_prompt, "Generate practical exercises", "true"
+        ).casefold()
+        not in {"false", "no", "0"},
+    }
+
+
+def _blueprint_from_spec_prompt(user_prompt: str) -> dict[str, Any]:
+    topic = _line_value(user_prompt, "Topic", "the book's subject")
+    audience = _line_value(user_prompt, "Target audience", "readers")
+    promise = _line_value(
+        user_prompt, "Main promise to the reader", f"Make practical progress with {topic}."
+    )
+    required = _line_items(user_prompt, "REQUIRED topics (must be covered)")
+    key_topics = _line_items(user_prompt, "Key topics")
+    topics = _unique(required + key_topics) or _setup_key_topics(topic, promise)
+    chapter_count = _line_int(user_prompt, "Planned chapters", fallback=8)
+    chapter_count = max(1, min(chapter_count, 25))
+    total_words = _line_int(user_prompt, "Target word count", fallback=10000)
+    is_education = bool(
+        re.search(r"teacher|classroom|student|school|lesson", f"{topic} {audience}", re.I)
+    )
+
+    chapters: list[dict[str, Any]] = []
+    for index in range(chapter_count):
+        focus = topics[index % len(topics)]
+        short_focus = _compact_focus(focus)
+        if is_education:
+            title_templates = (
+                "{focus} for teachers",
+                "A practical workflow for {focus}",
+                "Adapting {focus} to learner needs",
+                "Reviewing quality and privacy in {focus}",
+                "Building a repeatable {focus} practice",
+            )
+        else:
+            title_templates = (
+                "Core principles of {focus}",
+                "A practical workflow for {focus}",
+                "Applying {focus} to real situations",
+                "Common challenges in {focus} and how to address them",
+                "Evaluating and improving {focus}",
+            )
+        chapter_title = title_templates[index % len(title_templates)].format(focus=short_focus)
+        chapter_focus = focus
+        objective = (
+            f"Help {audience} understand and apply {chapter_focus} in the context of {topic}, "
+            f"moving toward the book's promise: {promise}"
+        )
+        lessons = [
+            f"Key principles of {short_focus}",
+            f"Apply {short_focus} in a real workflow",
+            "Measure results and refine the process",
+        ]
+        chapters.append(
+            {
+                "title": chapter_title[:300],
+                "objective": objective,
+                "summary": (
+                    f"Explains {chapter_focus} for {audience}, then connects the ideas "
+                    f"to a concrete workflow in {topic}. Readers identify a next step "
+                    "and a way to evaluate it."
+                ),
+                "key_lessons": lessons,
+                "important_examples": [
+                    f"A worked example applying {chapter_focus} to a realistic {topic} task",
+                    "A comparison of an unchecked approach with a reviewed, topic-focused approach",
+                ],
+                "practical_exercises": [
+                    f"Apply one principle from {chapter_focus} to a current task "
+                    "and record what changes."
+                ],
+                "estimated_word_count": max(1, total_words // chapter_count),
+                "connects_to_previous": "Builds on the previous topic in the book's sequence.",
+                "connects_to_future": (
+                    f"Prepares the reader to use {topics[(index + 1) % len(topics)]} "
+                    "next."
+                ),
+            }
+        )
+
+    return {
+        "introduction_purpose": (
+            f"Name the problem {audience} face with {topic}, state the promise ({promise}), "
+            "and preview the practical progression of the chapters."
+        ),
+        "conclusion_purpose": (
+            f"Review the methods covered for {topic}, return to the promise, and turn the reader's "
+            "learning into a specific next step."
+        ),
+        "estimated_total_word_count": total_words,
+        "chapters": chapters,
+    }
+
+
+def _outline_from_spec_prompt(user_prompt: str) -> dict[str, Any]:
+    block_match = re.search(
+        r"(?s)CHAPTER PLAN:\s*(.*?)(?=\nTarget word count for this chapter:)",
+        user_prompt,
+    )
+    plan_block = block_match.group(1) if block_match else user_prompt
+    chapter_title = _line_value(plan_block, "Title", "Chapter")
+    lessons = _line_items(plan_block, "Key lessons")
+    audience = _line_value(user_prompt, "Target audience", "readers")
+    target = _line_int(user_prompt, "Target word count for this chapter", fallback=1000)
+    count = max(3, min(7, round(target / 400)))
+    focus = _compact_focus(chapter_title, limit=6)
+    titles = [
+        f"The goal behind {focus}",
+        f"A repeatable approach to {lessons[0] if lessons else focus}",
+        f"A worked example for {audience}",
+        f"Checking the result against {focus}",
+        f"Common challenges in {focus}",
+        f"Practice: apply {focus} to a real task",
+        "Review and carry the method forward",
+    ][:count]
+    sections: list[dict[str, Any]] = []
+    for index, section_title in enumerate(titles):
+        lesson = lessons[index % len(lessons)] if lessons else focus
+        sections.append(
+            {
+                "title": section_title,
+                "purpose": f"Explain {lesson} and show how to apply it in practice.",
+                "key_points": [
+                    lesson,
+                    f"Apply {focus} in a real task",
+                    "Review results and adjust",
+                ],
+            }
+        )
+    return {"title": chapter_title, "sections": sections}
+
+
+def _section_from_prompt(user_prompt: str) -> str:
+    section_title = _line_value(user_prompt, "ASSIGNED SECTION", "Applying the chapter's key idea")
+    section_purpose = _line_value(user_prompt, "Section purpose", section_title)
+    chapter_title = _line_value(user_prompt, "CHAPTER", "this chapter")
+    topic = _line_value(user_prompt, "Topic", chapter_title)
+    audience = _line_value(user_prompt, "Target audience", "readers")
+    promise = _line_value(
+        user_prompt, "Main promise to the reader", f"Make practical progress with {topic}"
+    )
+    points = _line_items(user_prompt, "Key points to cover")
+    target = _line_int(user_prompt, "Target length for this section", fallback=250)
+    target = max(50, min(target, 3000))
+    domain = f"{topic} {chapter_title} {section_title} {audience}".casefold()
+    is_education = bool(re.search(r"teacher|classroom|student|school|lesson|learner", domain))
+    is_technical = bool(re.search(r"software|engineer|system|technical|code|data|ai tools", domain))
+    focus = _compact_focus(section_title.rstrip(". "), limit=6)
+
+    section_purpose = section_purpose.rstrip(" .")
+    paragraphs = [
+        f"## {section_title}",
+        (
+            f"This section focuses on {section_purpose}. For {audience}, "
+            f"connect it to {chapter_title} in a real task. "
+            "Define the result, constraints, and review criteria before acting."
+        ),
+    ]
+    point_limit = 3 if target >= 250 else 2 if target >= 150 else 1
+    selected_points = points[:point_limit] or [section_purpose]
+    selected_points = [_compact_focus(point, limit=9) for point in selected_points]
+    point_templates = [
+        (
+            "Begin with “{point}.” State the task, desired result, and constraints "
+            "before choosing a tool. This keeps attention on {focus}."
+        ),
+        (
+            "Apply “{point}” to one real situation. Make the context specific to "
+            "{audience}; mark uncertain assumptions for later checking."
+        ),
+        (
+            "Check “{point}” against the goal. Identify evidence of success and "
+            "what to change if the result falls short."
+        ),
+    ]
+    for index, point in enumerate(selected_points):
+        paragraphs.append(
+            point_templates[index % len(point_templates)].format(
+                point=point.rstrip("."), focus=focus, audience=audience
+            )
+        )
+
+    if is_education:
+        paragraphs.append(
+            "For example, a teacher can provide the learning goal, grade range, subject, "
+            "and time available, then request a draft activity. Leave student names, "
+            "grades, and support plans out of the prompt. The teacher checks accuracy, "
+            "accessibility, and class fit before use."
+        )
+    elif is_technical:
+        paragraphs.append(
+            f"For example, a team can test {focus} on one bounded task before adding it "
+            "to a larger workflow. Record the input, expected result, and constraints, "
+            "then compare against a known-good check while the change is easy to reverse."
+        )
+    else:
+        paragraphs.append(
+            f"For example, choose one current task that illustrates {focus}. Define a "
+            "useful result, try the approach, and compare the outcome with the original "
+            "need. One specific case helps the reader adapt the method without treating "
+            "it as a universal rule."
+        )
+
+    if re.search(r"\b(ai|artificial intelligence|generative)\b", domain):
+        paragraphs.append(
+            f"Before using AI-generated material, verify factual claims and check it "
+            f"against {promise}. Remove private data, look for bias or missing context, "
+            "and revise it using the author's judgment."
+        )
+    else:
+        paragraphs.append(
+            f"Compare the result with the purpose of {focus} and the book's promise: "
+            f"{promise}. Keep supported choices, revisit assumptions, and note one "
+            "improvement for the next attempt."
+        )
+
+    paragraphs.append(
+        f"Practice a small cycle: define the goal, try one step, review, and adjust. "
+        f"This makes {focus} repeatable while keeping {topic} in view."
+    )
+    additions = [
+        (
+            f"Keep a brief record of the decision, the constraint that mattered most, "
+            f"and the evidence used to review {focus}. That record helps the reader "
+            "tell a useful adjustment from a change made only by habit."
+        ),
+        (
+            "If the first attempt falls short, change one part of the process at a time. "
+            "Revisit the goal, check whether the context was complete, and choose a next "
+            f"step that still supports {promise}."
+        ),
+        (
+            "For ongoing work, decide who reviews the result and when it should be revisited. "
+            f"A clear checkpoint protects {focus} as circumstances change for {audience}."
+        ),
+        (
+            "A second example can test whether the method transfers beyond the first case. "
+            f"Use a different task within {topic}, keep the same quality criteria, and "
+            "record where the approach needs adaptation."
+        ),
+    ]
+    while _word_count("\n\n".join(paragraphs)) < int(target * 0.88) and additions:
+        candidate = additions.pop(0)
+        proposed = _word_count("\n\n".join(paragraphs + [candidate]))
+        if proposed > int(target * 1.2) and _word_count("\n\n".join(paragraphs)) >= int(
+            target * 0.8
+        ):
+            break
+        paragraphs.append(candidate)
+    return "\n\n".join(paragraphs)
+
+
+def _chapter_summaries_from_prompt(user_prompt: str) -> list[tuple[str, str]]:
+    summaries = []
+    for match in re.finditer(
+        r"(?m)^\s*-\s*Chapter\s+(\d+)\s*:\s*(.*?)\s*[—–-]\s*(.*?)\s*$",
+        user_prompt,
+    ):
+        summaries.append((match.group(2).strip(), match.group(3).strip()))
+    return summaries
+
+
+def _front_matter_from_prompt(user_prompt: str, *, conclusion: bool) -> str:
+    heading = "Conclusion" if conclusion else "Introduction"
+    topic = _line_value(user_prompt, "Topic", "this subject")
+    audience = _line_value(user_prompt, "Target audience", "readers")
+    promise = _line_value(
+        user_prompt, "Main promise to the reader", f"Make practical progress with {topic}"
+    )
+    title = _line_value(user_prompt, "Title", "this book")
+    purpose_label = (
+        "Conclusion purpose from the blueprint"
+        if conclusion
+        else "Introduction purpose from the blueprint"
+    )
+    purpose = _line_value(user_prompt, purpose_label, "")
+    target = max(50, min(_line_int(user_prompt, "Target length", fallback=200), 3000))
+    summaries = _chapter_summaries_from_prompt(user_prompt)
+
+    def compact(value: str, word_limit: int) -> str:
+        words = value.split()
+        shortened = " ".join(words[:word_limit]).rstrip(" ,;:")
+        return shortened + ("…" if len(words) > word_limit else "")
+
+    chapter_previews = [
+        f"- Chapter {index}: {compact(chapter_title, 8)} — {compact(summary, 7)}"
+        for index, (chapter_title, summary) in enumerate(summaries, start=1)
+    ]
+    purpose_excerpt = compact(purpose, 10)
+    conclusion_next_step = purpose_excerpt or (
+        "Adjust the next step when evidence or circumstances call for a change."
+    )
+    if conclusion:
+        paragraphs = [
+            f"## {heading}",
+            f"This book focused on {topic} for {audience}. Its promise was: {promise}. "
+            "The chapter sequence turns that aim into methods, examples, and checks "
+            "a reader can apply.",
+            *chapter_previews,
+            f"Choose one practice from {topic}, define a sign of progress, and "
+            f"review the result after trying it. {conclusion_next_step}",
+        ]
+    else:
+        paragraphs = [
+            f"## {heading}",
+            f"For {audience}, {topic} is easier to approach when the next step is clear. "
+            "This book narrows the subject to decisions readers can understand, try, "
+            "and review in their own context.",
+            f"The promise is practical: {promise}. The chapters build toward it "
+            f"through concrete actions and checks. {purpose_excerpt}",
+            *chapter_previews,
+            f"As you read {title}, keep one current task in mind. Test an idea, "
+            "note what happened, and adapt it to your setting.",
+        ]
+
+    additions = [
+        (
+            f"No single workflow fits every situation in {topic}. Treat examples as "
+            "starting points, verify details that matter, and adapt the steps to the "
+            f"responsibilities and resources available to {audience}."
+        ),
+        (
+            "When an approach misses the mark, identify the assumption that failed, "
+            "change one part of the process, and review the next attempt against the "
+            "same goal."
+        ),
+    ]
+    while _word_count("\n\n".join(paragraphs)) < int(target * 0.88) and additions:
+        candidate = additions.pop(0)
+        current_words = _word_count("\n\n".join(paragraphs))
+        if current_words + _word_count(candidate) > int(target * 1.2):
+            break
+        paragraphs.append(candidate)
+    return "\n\n".join(paragraphs)
+
+
+def _chapter_validation_unavailable() -> dict[str, Any]:
+    message = (
+        "The offline Local engine cannot reliably judge semantic relevance, depth, or coverage. "
+        "Configure a supported AI provider and review this chapter before publication."
+    )
+    return {
+        "relevance_score": None,
+        "outline_coverage": None,
+        "depth_score": None,
+        "continuity_score": None,
+        "issues": [message],
+        "missing_sections": [],
+        # Let the pipeline fall back to the chapter's planned summary for
+        # continuity; validator diagnostics must not masquerade as a summary.
+        "summary": "",
+    }
+
+
+def _manuscript_validation_unavailable(user_prompt: str) -> dict[str, Any]:
+    chapters = [
+        int(match.group(1))
+        for match in re.finditer(r"(?m)^\s*-\s*Chapter\s+(\d+)\s*:", user_prompt)
+        if int(match.group(1)) > 0
+    ]
+    issue = (
+        "The offline Local engine cannot certify that the manuscript delivers its promise "
+        "or covers every required topic. A model-based quality review is "
+        "required before formatting."
+    )
+    return {
+        "overall_quality": 0,
+        "promise_delivered": False,
+        "required_topics_covered": False,
+        "coherence_score": 0,
+        "ready_for_formatting": False,
+        "weak_chapters": chapters,
+        "issues": [issue],
+        "recommendations": [
+            "Configure a supported AI provider, run the manuscript audit, "
+            "and review flagged chapters."
+        ],
+        "summary": "Book-level semantic validation is unavailable in the offline Local engine.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +683,9 @@ def _chapter_markdown(user_prompt: str) -> str:
             for line in raw.splitlines()
             if line.strip()
         )
-    section_titles = [line for line in outline_block.splitlines() if line][:6] or _sections_for(topic, int(chapter_number or 1))
+    section_titles = [line for line in outline_block.splitlines() if line][:6] or _sections_for(
+        topic, int(chapter_number or 1)
+    )
 
     parts: list[str] = [f"# {chapter_title}"]
     intro_t = _INTRO_TEMPLATES[int(chapter_number or 1) % len(_INTRO_TEMPLATES)]
@@ -211,8 +713,10 @@ def _chapter_markdown(user_prompt: str) -> str:
         block_index += 1
 
     point = (
-        purpose[:80] if purpose else
-        f"The practical steps in this chapter move {audience} measurably closer to mastery of {topic}."
+        purpose[:80]
+        if purpose
+        else f"The practical steps in this chapter move {audience} "
+        f"measurably closer to mastery of {topic}."
     )
     parts.append(_TAKEAWAY_TEMPLATE.format(point=point))
     parts.append(
@@ -285,11 +789,13 @@ def _brief(user_prompt: str) -> dict[str, Any]:
         "subtitle": subtitle,
         "book_purpose": (
             f"Help {audience} master {description or title} through clear explanations, "
-            "practical examples, and a structured path from first principles to confident application."
+            "practical examples, and a structured path from first principles "
+            "to confident application."
         ),
         "target_reader": audience,
         "reader_problems": [
-            f"{audience.title()} lacks a clear, structured starting point for {description or title}",
+            f"{audience.title()} lacks a clear, structured starting point "
+            f"for {description or title}",
             "Information overload from scattered advice and no repeatable method",
             "Difficulty turning knowledge into consistent daily practice",
         ],
@@ -299,11 +805,36 @@ def _brief(user_prompt: str) -> dict[str, Any]:
         ),
         "tone": tone,
         "writing_style": style,
-        "key_themes": themes or ["Practical application", "Consistent practice", "Clear frameworks"],
-        "major_concepts": [f"Core framework for {description or title}", "Common pitfalls", "Action routines"],
-        "topics_to_avoid": ["Unnecessary jargon", "Unverified claims", "Overly dense theory without examples"],
-        "suggested_structure": "Introduction, followed by progressive chapters that build skill step by step, ending with a practical action plan.",
-        "estimated_chapter_count": 5 if words <= 5000 else 8 if words <= 10000 else 10 if words <= 15000 else 14 if words <= 25000 else 20,
+        "key_themes": themes or [
+            "Practical application",
+            "Consistent practice",
+            "Clear frameworks",
+        ],
+        "major_concepts": [
+            f"Core framework for {description or title}",
+            "Common pitfalls",
+            "Action routines",
+        ],
+        "topics_to_avoid": [
+            "Unnecessary jargon",
+            "Unverified claims",
+            "Overly dense theory without examples",
+        ],
+        "suggested_structure": (
+            "Introduction, followed by progressive chapters that build skill step by step, "
+            "ending with a practical action plan."
+        ),
+        "estimated_chapter_count": (
+            5
+            if words <= 5000
+            else 8
+            if words <= 10000
+            else 10
+            if words <= 15000
+            else 14
+            if words <= 25000
+            else 20
+        ),
         "estimated_word_count": words,
     }
 
@@ -330,7 +861,10 @@ def _proofread_suggestions(text: str) -> list[dict[str, Any]]:
                 "category": "style", "severity": "low", "confidence": 0.6,
                 "original_text": match.group(0),
                 "suggested_text": None,
-                "explanation": "Passive construction. Consider rewriting with an active subject for a stronger sentence.",
+                "explanation": (
+                    "Passive construction. Consider rewriting with an active subject "
+                    "for a stronger sentence."
+                ),
             })
     # Filler words
     for word in _FILLERS:
@@ -343,7 +877,10 @@ def _proofread_suggestions(text: str) -> list[dict[str, Any]]:
                 "category": "style", "severity": "low", "confidence": 0.8,
                 "original_text": match.group(0),
                 "suggested_text": None,
-                "explanation": f"Filler word '{word}' usually weakens the sentence. Removing it tightens the prose.",
+                "explanation": (
+                    f"Filler word '{word}' usually weakens the sentence. "
+                    "Removing it tightens the prose."
+                ),
             })
     # Repeated words
     for match in re.finditer(r"\b(\w{4,})\b\s+\1\b", text, re.IGNORECASE):
@@ -399,9 +936,11 @@ def _marketing_asset(user_prompt: str) -> str:
     if "email" in label.lower():
         return (
             f"Subject: Your {title} journey starts here\n\n"
-            f"Hi there,\n\nYou are reading this because {description or title} matters to you. "
-            f"This book gives {audience} a clear, friendly path — with exercises at the "
-            f"end of every chapter. Reply to this email with any questions. Happy reading!"
+            f"Hi there,\n\nYou are reading this because "
+            f"{description or title} matters to you. "
+            f"This book gives {audience} a clear, friendly path — "
+            "with exercises at the end of every chapter. "
+            "Reply to this email with any questions. Happy reading!"
         )
     return (
         f"{title} — {description}\n"
@@ -410,7 +949,11 @@ def _marketing_asset(user_prompt: str) -> str:
 
 
 def _cover_brief(user_prompt: str) -> str:
-    title = _extract(user_prompt, "title placement", _extract(user_prompt, "Book Title", "The book"))
+    title = _extract(
+        user_prompt,
+        "title placement",
+        _extract(user_prompt, "Book Title", "The book"),
+    )
     title = title.replace('"', "").strip()
     subtitle = _extract(user_prompt, "subtitle placement", "").replace('"', "").strip()
     author = _extract(user_prompt, "author name", "Author").replace('"', "").strip()
@@ -418,15 +961,20 @@ def _cover_brief(user_prompt: str) -> str:
         description = _extract(user_prompt, "Description", title)
         return (
             "Back cover design brief\n"
-            "1. Blurb: " + description[:400] + " — a practical, encouraging description of the book.\n"
-            "2. Author bio: A short, warm bio positioning the author as a trusted guide for the reader.\n"
-            "3. Layout: Blurb on the left, author bio below, barcode/ISBN placeholder in the bottom-right corner.\n"
-            "4. Palette: Matches the front cover; calm, professional tones with high contrast for the blurb."
+            f"1. Blurb: {description[:400]} — a practical, encouraging "
+            "description of the book.\n"
+            "2. Author bio: A short, warm bio positioning the author as a trusted "
+            "guide for the reader.\n"
+            "3. Layout: Blurb on the left, author bio below, barcode/ISBN placeholder "
+            "in the bottom-right corner.\n"
+            "4. Palette: Matches the front cover; calm, professional tones with "
+            "high contrast for the blurb."
         )
     if "SPINE" in user_prompt:
         return (
             "Spine design brief\n"
-            "1. Text layout: Title top-to-bottom (reading direction), author name top-to-bottom below it.\n"
+            "1. Text layout: Title top-to-bottom (reading direction), author name "
+            "top-to-bottom below it.\n"
             "2. Width: Standard trade spine; keep text 20% smaller than the cover title.\n"
             "3. Publisher logo: Small, bottom third of the spine.\n"
             "4. Color: Same background as the front cover for a continuous look."
@@ -435,10 +983,14 @@ def _cover_brief(user_prompt: str) -> str:
         "Front cover design brief\n"
         f"1. Concept: A clean, memorable visual that signals '{subtitle or 'a practical guide'}' — "
         "one strong central image with generous negative space.\n"
-        f"2. Palette: 3-5 colors — a primary accent, a neutral background, and two supporting tones.\n"
-        "3. Typography: Bold serif or geometric sans for the title; light sans for the subtitle.\n"
-        f"4. Key elements: Title '{title}' centered or upper-third; subtitle below; author '{author}' at the bottom.\n"
-        "5. Layout: Balanced thirds composition, safe margins for trim, no text closer than 0.5in to the edge."
+        "2. Palette: 3-5 colors — a primary accent, a neutral background, "
+        "and two supporting tones.\n"
+        "3. Typography: Bold serif or geometric sans for the title; "
+        "light sans for the subtitle.\n"
+        f"4. Key elements: Title '{title}' centered or upper-third; "
+        f"subtitle below; author '{author}' at the bottom.\n"
+        "5. Layout: Balanced thirds composition, safe margins for trim, "
+        "no text closer than 0.5in to the edge."
     )
 
 
@@ -467,7 +1019,6 @@ def _assistant_edit(user_prompt: str, action: str) -> str:
         kept = sentences[: max(1, int(len(sentences) * 0.7))]
         return " ".join(kept).strip()
     if action == "expand":
-        topic = _topic_words(content, 1)
         extra = (
             "\n\nLet us look at this from another angle. When readers first meet these ideas, "
             "they often focus on the *what* and skip the *why*. That is a mistake: understanding "
@@ -618,7 +1169,8 @@ class LocalProvider(AIProvider):
             text = (
                 f"Here is a practical take on \"{user[:140]}\".\n\n"
                 f"Start from the reader's situation: what do they know, what do they "
-                f"need, and what is the smallest next step? For {' and '.join(topic) or 'this topic'}, "
+                "need, and what is the smallest next step? For "
+                f"{' and '.join(topic) or 'this topic'}, "
                 f"a concrete example beats abstract advice every time. Structure the answer as: "
                 f"insight, example, action — then invite the reader to apply it before moving on."
             )
@@ -630,9 +1182,40 @@ class LocalProvider(AIProvider):
         )
 
     # ------------------------------------------------------------------
-    async def generate_structured_output(self, request: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    async def generate_structured_output(
+        self, request: Any, schema: dict[str, Any]
+    ) -> dict[str, Any]:
         system, user = self._prompt_text(request)
         properties = (schema or {}).get("properties") or {}
+        task = (getattr(request, "metadata", None) or {}).get("task")
+
+        # Pipeline prompts share a {content: str} schema, so dispatch by task
+        # before looking at the schema. Ignoring this metadata was the cause of
+        # one-section requests being treated as whole-chapter requests.
+        if task == "generate_book_specification":
+            return _specification_from_prompt(user)
+        if task == "generate_book_blueprint":
+            if "BOOK SPECIFICATION (LOCKED" in user:
+                return _blueprint_from_spec_prompt(user)
+            return _blueprint(user)
+        if task == "generate_chapter_outline":
+            if "CHAPTER PLAN:" in user:
+                return _outline_from_spec_prompt(user)
+        if task == "generate_chapter_section":
+            return {"content": _section_from_prompt(user)}
+        if task == "validate_chapter":
+            return _chapter_validation_unavailable()
+        if task == "validate_manuscript":
+            return _manuscript_validation_unavailable(user)
+        if task == "generate_introduction":
+            return {"content": _front_matter_from_prompt(user, conclusion=False)}
+        if task == "generate_conclusion":
+            return {"content": _front_matter_from_prompt(user, conclusion=True)}
+        if task == "revise_chapter":
+            current = re.search(
+                r"(?s)CURRENT CHAPTER CONTENT:\s*(.*?)(?=\n\nStyle guidance:|$)", user
+            )
+            return {"content": current.group(1).strip() if current else ""}
 
         if "content" in properties and set(properties.keys()) <= {"content"}:
             return {"content": _chapter_markdown(user)}

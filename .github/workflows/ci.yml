@@ -2,20 +2,83 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "master"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  foundation:
-    name: Foundation checks
+  backend:
+    name: Backend tests, migrations, and scoped lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify required directories
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+        working-directory: backend
+      - name: Run scoped Ruff checks
         run: |
-          test -d frontend
-          test -d backend
-          test -d docs
-          test -d prompts
-          test -d shared
-          test -d database
+          ruff check --select F401,F841,F541,I001 \
+            core/config.py \
+            api/v1/async_jobs.py api/v1/exports.py api/v1/generation.py \
+            api/v1/marketing.py api/v1/translation.py \
+            models/__init__.py models/book_writing.py \
+            providers/ai/local_provider.py \
+            schemas/exports.py schemas/kdp.py schemas/marketing.py schemas/translation.py \
+            services/ai_service.py services/book_identity.py services/book_service.py \
+            services/export/engine.py services/generation/orchestrator.py \
+            services/generation/pipeline.py services/jobs/handlers.py \
+            services/jobs/runner.py services/kdp/engine.py services/marketing/engine.py \
+            services/studio_service.py services/translation/engine.py \
+            migrations/versions/20261005_0001_source_preserving_translations.py \
+            migrations/versions/20261005_0002_canonical_project_book_link.py \
+            migrations/versions/20261005_0003_repair_legacy_book_asset_ids.py \
+            tests/conftest.py tests/test_book_identity.py \
+            tests/test_book_identity_migration.py tests/test_generation_pipeline.py \
+            tests/test_job_handlers.py tests/test_kdp_checks.py \
+            tests/test_local_provider_generation.py tests/test_phase2_foundation.py \
+            tests/test_production_qa.py \
+            tests/test_studio_flow.py tests/test_translation.py
+        working-directory: backend
+      - name: Verify full SQLite migration chain
+        run: |
+          mkdir -p var
+          DATABASE_URL=sqlite+aiosqlite:///./var/ci_migrations.db alembic upgrade head
+        working-directory: backend
+      - name: Run backend tests
+        run: python -m pytest tests/ -q
+        working-directory: backend
+
+  frontend:
+    name: Frontend tests, typecheck, lint, and production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Run frontend tests
+        run: npm test -- --reporter=dot
+        working-directory: frontend
+      - name: Typecheck frontend
+        run: npm run typecheck
+        working-directory: frontend
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+      - name: Build OpenNext Cloudflare Worker
+        run: npm run build
+        working-directory: frontend

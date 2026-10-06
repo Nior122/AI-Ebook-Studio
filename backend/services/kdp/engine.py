@@ -8,18 +8,18 @@ overflow, blank pages, missing chapters.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.exceptions import ResourceNotFoundError, ValidationAppError
+from core.exceptions import ValidationAppError
 from models.accounts import User
 from models.assets import BookSettings, KDPValidationReport
-from models.book_writing import WritingBook, WritingChapter
+from models.book_writing import WritingChapter
 from models.enums import KDPValidationStatus
+from services.book_identity import get_owned_writing_book, require_project_book_id
 
 TRIM_DIMENSIONS = {
     "6x9": (6.0, 9.0),
@@ -44,11 +44,8 @@ class KDPValidator:
         book_id: UUID,
     ) -> KDPValidationReport:
         """Run all KDP validation checks and persist the report."""
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.deleted_at is not None:
-            raise ResourceNotFoundError("Book not found.")
-        if book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
 
         chapter_result = await session.execute(
             select(WritingChapter)
@@ -61,7 +58,7 @@ class KDPValidator:
             raise ValidationAppError("Cannot validate a book with no chapters.")
 
         settings_result = await session.execute(
-            select(BookSettings).where(BookSettings.book_id == book_id),
+            select(BookSettings).where(BookSettings.book_id == project_book_id),
         )
         settings = settings_result.scalar_one_or_none()
 
@@ -90,13 +87,13 @@ class KDPValidator:
 
         # Delete previous report(s) for this book.
         prev_result = await session.execute(
-            select(KDPValidationReport).where(KDPValidationReport.book_id == book_id),
+            select(KDPValidationReport).where(KDPValidationReport.book_id == project_book_id),
         )
         for prev in prev_result.scalars():
             await session.delete(prev)
 
         report = KDPValidationReport(
-            book_id=book_id,
+            book_id=project_book_id,
             status=status_val.value,
             score=score,
             issues=issues,
@@ -115,12 +112,11 @@ class KDPValidator:
         book_id: UUID,
     ) -> KDPValidationReport | None:
         """Return the most recent validation report for a book."""
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
         result = await session.execute(
             select(KDPValidationReport)
-            .where(KDPValidationReport.book_id == book_id)
+            .where(KDPValidationReport.book_id == project_book_id)
             .order_by(KDPValidationReport.created_at.desc()),
         )
         return result.scalars().first()
@@ -191,8 +187,8 @@ class KDPValidator:
             if val < MIN_MARGIN_INCHES:
                 issues.append({
                     "check": check,
-                    "message": f"{side.capitalize()} margin ({val}\") is below KDP minimum ({MIN_MARGIN_INCH}\").",
-                    "recommendation": f"Increase {side} margin to at least {MIN_MARGIN_INCH}\".",
+                    "message": f"{side.capitalize()} margin ({val}\") is below KDP minimum ({MIN_MARGIN_INCHES}\").",
+                    "recommendation": f"Increase {side} margin to at least {MIN_MARGIN_INCHES}\".",
                 })
             elif val < 0.5:
                 warnings.append({
@@ -285,8 +281,6 @@ class KDPValidator:
                 problems.append(f"Chapter {ch.chapter_number} has no title.")
             content = ch.content or ""
             h1_count = len(re.findall(r"^#\s+", content, re.MULTILINE))
-            h2_count = len(re.findall(r"^##\s+", content, re.MULTILINE))
-            h3_count = len(re.findall(r"^###\s+", content, re.MULTILINE))
             if h1_count > 1:
                 problems.append(f"Chapter {ch.chapter_number} has multiple H1 headings.")
 

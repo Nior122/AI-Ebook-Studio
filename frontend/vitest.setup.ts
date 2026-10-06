@@ -1,13 +1,15 @@
-// Vitest setup: registers jest-dom matchers and silences noisy console output
-// during tests. Imported automatically via vitest.config.ts `setupFiles`.
+// Vitest setup: registers jest-dom matchers and shared Clerk test doubles.
+// The mocks keep component tests independent of Clerk's hosted auth service;
+// they do not simulate the provider's authentication flow.
 
 import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 
-// Mock @clerk/nextjs so component tests don't need the real Clerk instance.
+// Clerk is mocked so components can be tested without a configured Clerk app.
+// Auth state is a spy so individual tests can match the actual useAuth contract.
 vi.mock("@clerk/nextjs", () => ({
-  useUser: () => ({
+  useUser: vi.fn(() => ({
     isLoaded: true,
     isSignedIn: true,
     user: {
@@ -18,23 +20,25 @@ vi.mock("@clerk/nextjs", () => ({
       primaryEmailAddress: { emailAddress: "test@example.com" },
       imageUrl: "",
     },
-  }),
-  useAuth: () => ({
+  })),
+  useAuth: vi.fn(() => ({
     isLoaded: true,
     isSignedIn: true,
     userId: "test_user_id",
     sessionId: "test_session_id",
     getToken: vi.fn(),
     signOut: vi.fn(),
-  }),
-  useClerk: () => ({
+  })),
+  useClerk: vi.fn(() => ({
     signOut: vi.fn(),
     openSignIn: vi.fn(),
     openSignUp: vi.fn(),
-  }),
+  })),
   ClerkProvider: ({ children }: { children: React.ReactNode }) => children,
   SignedIn: ({ children }: { children: React.ReactNode }) => children,
   SignedOut: () => null,
+  SignIn: () => "Clerk sign-in widget",
+  SignUp: () => "Clerk sign-up widget",
 }));
 
 afterEach(() => {

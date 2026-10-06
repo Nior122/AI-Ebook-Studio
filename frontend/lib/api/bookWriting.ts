@@ -24,6 +24,38 @@ import type {
 
 const BASE = "/book-writing";
 
+export interface TranslatedChapter {
+  id: string;
+  translation_id: string;
+  source_chapter_id: string;
+  chapter_number: number;
+  title: string;
+  content: string;
+  word_count: number;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TranslationEdition {
+  id: string;
+  book_id: string;
+  source_language: string;
+  target_language: string;
+  status: string;
+  source_chapter_count: number;
+  translated_chapter_count: number;
+  target_word_count: number;
+  error_message: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  chapters: TranslatedChapter[];
+}
+
+export type TranslationSummary = Omit<TranslationEdition, "chapters">;
+
 export const bookWritingApi = {
   // ── Books ──────────────────────────────────────────────
   async createBook(payload: WritingBookCreatePayload): Promise<WritingBook> {
@@ -207,11 +239,17 @@ export const bookWritingApi = {
   async listTranslateLanguages(bookId: string): Promise<Array<{code:string;name:string}>> {
     return apiClient.get(`${BASE}/books/${bookId}/translate/languages`);
   },
-  async translateBook(bookId: string, payload: {source_language:string;target_language:string}): Promise<any> {
-    return apiClient.post(`${BASE}/books/${bookId}/translate`, payload);
+  async translateBook(
+    bookId: string,
+    payload: { source_language: string; target_language: string; translation_id?: string },
+  ): Promise<TranslationEdition> {
+    return apiClient.post<TranslationEdition>(`${BASE}/books/${bookId}/translate`, payload);
   },
-  async listTranslations(bookId: string): Promise<{items:Array<any>}> {
-    return apiClient.get(`${BASE}/books/${bookId}/translate/history`);
+  async listTranslations(bookId: string): Promise<{ items: TranslationSummary[] }> {
+    return apiClient.get<{ items: TranslationSummary[] }>(`${BASE}/books/${bookId}/translate/history`);
+  },
+  async getTranslation(bookId: string, translationId: string): Promise<TranslationEdition> {
+    return apiClient.get<TranslationEdition>(`${BASE}/books/${bookId}/translate/${translationId}`);
   },
 
   // ── Cover ───────────────────────────────────────────────

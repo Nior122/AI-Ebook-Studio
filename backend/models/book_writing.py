@@ -10,6 +10,7 @@ These models implement a self-contained, user-owned book writing workflow:
             │     └── ChapterVersions
             ├── Manuscript  (latest assembled/approved content snapshot)
             ├── WritingSession (autosave / generation bookkeeping)
+            ├── WritingBookTranslation (source-preserving translated edition)
             └── BookSettings (per-book writing-style profile + preferences)
 
 Every entity is owned by a ``user_id`` and soft-deleted via ``deleted_at``
@@ -19,17 +20,18 @@ row lookup — the foundation for IDOR protection.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -58,10 +60,18 @@ class WritingBook(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_bw_books_user_id", "user_id"),
         Index("ix_bw_books_status", "status"),
         Index("ix_bw_books_current_step", "current_step"),
+        Index("ix_bw_books_project_book_id", "project_book_id", unique=True),
     )
 
     user_id: Mapped[UUID] = mapped_column(
         GUID(), ForeignKey("users.id"), nullable=False
+    )
+    # Canonical link to the project-level book. Legacy clients still read the
+    # reciprocal metadata_json value, but cross-module code must use this FK.
+    project_book_id: Mapped[UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("books.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     # --- Book idea / metadata ---
@@ -122,6 +132,11 @@ class WritingBook(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     writing_sessions: Mapped[list[WritingSession]] = relationship(
         back_populates="book", cascade="all, delete-orphan"
+    )
+    translations: Mapped[list[WritingBookTranslation]] = relationship(
+        back_populates="book",
+        cascade="all, delete-orphan",
+        order_by="WritingBookTranslation.created_at.desc()",
     )
 
     user: Mapped[User] = relationship(foreign_keys=[user_id])
@@ -461,3 +476,73 @@ class WritingBookSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     style_notes: Mapped[str | None] = mapped_column(Text)
 
     book: Mapped[WritingBook] = relationship(back_populates="settings")
+
+
+# ---------------------------------------------------------------------------
+# Source-preserving translated editions
+# ---------------------------------------------------------------------------
+class WritingBookTranslation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A separate translated edition tied to a WritingBook source revision.
+
+    Translation content is deliberately stored in child rows instead of
+    replacing ``WritingChapter.content``. Each request gets its own edition ID;
+    a failed edition can be resumed while its source hashes still match.
+    """
+
+    __tablename__ = "bw_translations"
+    __table_args__ = (
+        Index("ix_bw_translations_book_id", "book_id"),
+        Index("ix_bw_translations_status", "status"),
+    )
+
+    book_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("bw_books.id", ondelete="CASCADE"), nullable=False
+    )
+    source_language: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_language: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_revision_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_chapter_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    translated_chapter_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    target_word_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    book: Mapped[WritingBook] = relationship(back_populates="translations")
+    chapters: Mapped[list[TranslatedChapter]] = relationship(
+        back_populates="translation",
+        cascade="all, delete-orphan",
+        order_by="TranslatedChapter.chapter_number",
+    )
+
+
+class TranslatedChapter(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A translated chapter snapshot; the linked source chapter is never edited."""
+
+    __tablename__ = "bw_translation_chapters"
+    __table_args__ = (
+        UniqueConstraint(
+            "translation_id",
+            "source_chapter_id",
+            name="uq_bw_translation_chapters_source",
+        ),
+        Index("ix_bw_translation_chapters_translation_id", "translation_id"),
+        Index("ix_bw_translation_chapters_source_chapter_id", "source_chapter_id"),
+    )
+
+    translation_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("bw_translations.id", ondelete="CASCADE"), nullable=False
+    )
+    source_chapter_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("bw_chapters.id"), nullable=False
+    )
+    chapter_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    source_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    word_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    translation: Mapped[WritingBookTranslation] = relationship(back_populates="chapters")
+    source_chapter: Mapped[WritingChapter] = relationship()

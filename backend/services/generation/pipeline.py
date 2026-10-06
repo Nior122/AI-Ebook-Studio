@@ -59,6 +59,46 @@ def _wc(text: str | None) -> int:
     return len(re.findall(r"\S+", text or ""))
 
 
+WORD_COUNT_MIN_RATIO = 0.80
+WORD_COUNT_MAX_RATIO = 1.20
+
+
+def _front_matter_word_target(target_word_count: int) -> int:
+    """Reserve a measured share of the total target for intro and conclusion."""
+    if target_word_count <= 0:
+        return 0
+    # Keep front/back matter concise in long books and proportional in short
+    # books so body chapter budgets still add up to the user's total target.
+    return min(
+        1500, max(1, min(int(target_word_count * 0.15), max(60, round(target_word_count * 0.06))))
+    )
+
+
+def _allocate_chapter_word_targets(
+    plans: list[dict[str, Any]], target_word_count: int
+) -> list[int]:
+    """Allocate the body-word budget across chapters using blueprint weights."""
+    if not plans:
+        return []
+    front_matter = _front_matter_word_target(target_word_count)
+    body_target = max(0, target_word_count - 2 * front_matter)
+    weights = [max(1, int(plan.get("estimated_word_count") or 1)) for plan in plans]
+    total_weight = sum(weights)
+    targets = [body_target * weight // total_weight for weight in weights]
+    remainder = body_target - sum(targets)
+    for index in range(remainder):
+        targets[index % len(targets)] += 1
+    return targets
+
+
+def _word_count_range(target_word_count: int) -> tuple[int, int]:
+    target = max(0, int(target_word_count))
+    return (
+        int(target * WORD_COUNT_MIN_RATIO),
+        int(target * WORD_COUNT_MAX_RATIO),
+    )
+
+
 def _normalized_title(title: str | None) -> str:
     if not title:
         return ""
@@ -77,9 +117,7 @@ def is_conclusion_title(title: str | None) -> bool:
     must not become body chapters or the conclusion stage appends a duplicate.
     """
     normalized = _normalized_title(title)
-    return normalized.startswith(
-        ("conclusion", "final thoughts", "closing thoughts", "epilogue")
-    )
+    return normalized.startswith(("conclusion", "final thoughts", "closing thoughts", "epilogue"))
 
 
 def _clamp_score(value: Any) -> int | None:
@@ -116,8 +154,8 @@ def _normalize_validation(validation: dict[str, Any], word_count: int) -> list[s
     """Coerce the audit's scores in place.
 
     Returns the list of keys that carried a usable score. Missing/unparseable
-    dimensions stay ``None`` so they neither fail the chapter nor count as
-    audit coverage.
+    dimensions stay ``None`` and are treated as an incomplete audit by the
+    validation gate; they can never silently count as a pass.
     """
     usable: list[str] = []
     for key, _threshold in _SCORE_KEYS:
@@ -131,21 +169,29 @@ def _normalize_validation(validation: dict[str, Any], word_count: int) -> list[s
     # with no findings. Treating that as real "0/100" would trigger pointless
     # revisions — treat it as no audit at all.
     if usable and all(validation[k] == 0 for k in usable):
-        has_findings = bool(validation.get("issues") or validation.get("missing_sections")
-                            or (validation.get("summary") or "").strip())
+        has_findings = bool(
+            validation.get("issues")
+            or validation.get("missing_sections")
+            or (validation.get("summary") or "").strip()
+        )
         if not has_findings:
             return []
 
     return usable
 
 
-def _audit_passed(validation: dict[str, Any], usable: list[str], word_count: int, target_wc: int) -> bool:
-    """Gate only on dimensions the audit actually scored."""
+def _audit_passed(
+    validation: dict[str, Any], usable: list[str], word_count: int, target_wc: int
+) -> bool:
+    """Require a complete audit, passing scores, and realistic chapter length."""
+    required = {key for key, _threshold in _SCORE_KEYS}
+    if not required.issubset(usable):
+        return False
     thresholds = dict(_SCORE_KEYS)
-    for key in usable:
-        if validation[key] < thresholds[key]:
-            return False
-    return word_count >= int(target_wc * 0.6)
+    if any(validation[key] < thresholds[key] for key in required):
+        return False
+    minimum, maximum = _word_count_range(target_wc)
+    return minimum <= word_count <= maximum
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +279,11 @@ async def upsert_specification(
     )
     spec = result.scalar_one_or_none()
     if spec is None:
-        spec = BookSpecification(book_id=book.id, book_title=data["book_title"], topic=data["topic"])
+        spec = BookSpecification(
+            book_id=book.id,
+            book_title=data["book_title"],
+            topic=data["topic"],
+        )
         session.add(spec)
 
     spec.book_title = data.get("book_title") or spec.book_title
@@ -463,14 +513,25 @@ class GenerationPipeline:
                 len(reserved), reserved,
             )
             chapters = [
-                c for c in chapters
-                if not (is_introduction_title(c.get("title")) or is_conclusion_title(c.get("title")))
+                c
+                for c in chapters
+                if not (
+                    is_introduction_title(c.get("title"))
+                    or is_conclusion_title(c.get("title"))
+                )
             ]
         if not chapters:
             raise RuntimeError("Blueprint generation returned no chapters.")
 
-        # Enforce the locked chapter count: trim or top-up deterministically.
+        # Never silently under-deliver the chapter count locked in the spec.
+        # An incomplete blueprint fails with its spec/checkpoint persisted so a
+        # retry can recover without presenting a partial manuscript as done.
         wanted = int(spec_dict.get("chapter_count") or len(chapters))
+        if len(chapters) < wanted:
+            raise RuntimeError(
+                f"Blueprint returned {len(chapters)} of {wanted} requested chapters. "
+                "Retry blueprint generation before writing the manuscript."
+            )
         chapters = chapters[:wanted]
 
         if blueprint is None:
@@ -523,12 +584,18 @@ class GenerationPipeline:
                 len(reserved), reserved,
             )
             plans = [
-                p for p in plans
-                if not (is_introduction_title(p.get("title")) or is_conclusion_title(p.get("title")))
+                p
+                for p in plans
+                if not (
+                    is_introduction_title(p.get("title"))
+                    or is_conclusion_title(p.get("title"))
+                )
             ]
         total = len(plans)
+        if total == 0:
+            raise RuntimeError("The blueprint contains no body chapters to outline.")
         target_total = int(spec_dict.get("target_word_count") or 10000)
-        default_wc = max(target_total // max(total, 1), 500)
+        chapter_word_targets = _allocate_chapter_word_targets(plans, target_total)
         titles = [str(p.get("title", f"Chapter {i + 1}")) for i, p in enumerate(plans)]
 
         # Load existing chapters (resume).
@@ -545,7 +612,7 @@ class GenerationPipeline:
         for i, plan in enumerate(plans):
             number = i + 1
             title = titles[i]
-            target_wc = int(plan.get("estimated_word_count") or default_wc)
+            target_wc = chapter_word_targets[i]
 
             chapter = by_number.get(number)
             if chapter is None:
@@ -594,7 +661,7 @@ class GenerationPipeline:
                     # Deterministic fallback so writing can always proceed.
                     sections = [
                         {
-                            "title": f"Opening: what this chapter covers",
+                            "title": "Opening: what this chapter covers",
                             "purpose": "Hook the reader and frame the chapter.",
                             "key_points": [str(plan.get("objective", ""))][:1],
                         },
@@ -606,7 +673,9 @@ class GenerationPipeline:
                         {
                             "title": "Putting it into practice",
                             "purpose": "Concrete application of the chapter.",
-                            "key_points": [str(e) for e in (plan.get("practical_exercises") or [])][:4]
+                            "key_points": [
+                                str(e) for e in (plan.get("practical_exercises") or [])
+                            ][:4]
                             or ["Apply the key ideas step by step."],
                         },
                         {
@@ -658,7 +727,10 @@ class GenerationPipeline:
             if chapter.content and chapter.status in ("draft", "approved", "needs_review"):
                 previous_summary = chapter.content_summary or chapter.summary or ""
                 pct = int(spread_start + per * (idx + 1))
-                await self.progress(pct, f"Chapter {chapter.chapter_number} already written — skipping")
+                await self.progress(
+                    pct,
+                    f"Chapter {chapter.chapter_number} already written — skipping",
+                )
                 continue
 
             pct = int(spread_start + per * idx)
@@ -728,7 +800,7 @@ class GenerationPipeline:
             raise RuntimeError("Chapter has no outline sections.")
 
         target_wc = chapter.target_word_count or 1000
-        per_section = max(target_wc // len(sections), 150)
+        per_section = max(1, target_wc // len(sections))
 
         written: list[dict[str, Any]] = []
         parts: list[str] = []
@@ -790,22 +862,28 @@ class GenerationPipeline:
             usable_scores = _normalize_validation(validation, _wc(content))
 
             issues = [str(i) for i in (validation.get("issues") or [])]
-            if validation["word_count"] < int(target_wc * 0.6):
+            minimum_words, maximum_words = _word_count_range(target_wc)
+            if not minimum_words <= validation["word_count"] <= maximum_words:
+                direction = "below" if validation["word_count"] < minimum_words else "above"
                 issues.append(
-                    f"Chapter is {validation['word_count']:,} words — well below the "
-                    f"{target_wc:,} word target. Expand with concrete detail."
+                    f"Chapter is {validation['word_count']:,} words, {direction} the allowed "
+                    f"{minimum_words:,}–{maximum_words:,} word range for its "
+                    f"{target_wc:,} word target."
                 )
                 validation["issues"] = issues
 
-            if not usable_scores:
-                # The audit came back unusable (provider quirk or offline stub).
-                # Treat the chapter as accepted rather than burning revisions
-                # on noise — but record that validation was unavailable.
-                validation["passed"] = True
+            required_scores = {key for key, _threshold in _SCORE_KEYS}
+            if not required_scores.issubset(usable_scores):
+                # Missing semantic scores are not a pass. Preserve the draft,
+                # avoid blind auto-revisions, and make the review requirement
+                # visible so a real provider or author can complete it later.
+                validation["passed"] = False
                 validation["validation_unavailable"] = True
+                validation["missing_scores"] = sorted(required_scores - set(usable_scores))
                 validation["revision_attempt"] = attempt
                 logger.warning(
-                    "Validation unavailable for chapter %d — accepting as-is",
+                    "Validation unavailable or incomplete for chapter %d — "
+                    "keeping draft for review",
                     chapter.chapter_number,
                 )
                 break
@@ -819,7 +897,8 @@ class GenerationPipeline:
 
             # Auto-revision using the audit findings.
             logger.info(
-                "Revising chapter %d (attempt %d/%d): relevance=%s coverage=%s depth=%s continuity=%s",
+                "Revising chapter %d (attempt %d/%d): relevance=%s "
+                "coverage=%s depth=%s continuity=%s",
                 chapter.chapter_number, attempt + 1, MAX_REVISIONS,
                 validation["relevance_score"], validation["outline_coverage"],
                 validation["depth_score"], validation["continuity_score"],
@@ -926,6 +1005,13 @@ class GenerationPipeline:
             body_numbers = [c.chapter_number for c in all_chapters if c.chapter_number >= 1]
             conclusion_number = (max(body_numbers) + 1) if body_numbers else 1
 
+        # Reserve the same measured front/back-matter budget used when body
+        # chapter targets were allocated; this keeps total manuscript length
+        # close to the user-requested total.
+        front_matter_target = _front_matter_word_target(
+            int(spec_dict.get("target_word_count") or 10000)
+        )
+
         # Introduction = chapter_number 0.
         intro = next((c for c in all_chapters if c.chapter_number == 0), None)
         if intro is None or not intro.content:
@@ -935,7 +1021,7 @@ class GenerationPipeline:
                     spec_dict,
                     summaries,
                     introduction_purpose=blueprint.introduction_purpose or "",
-                    target_word_count=800,
+                    target_word_count=front_matter_target,
                     style_guidance=style,
                     temperature=self.temperature,
                 )
@@ -952,7 +1038,7 @@ class GenerationPipeline:
                 intro.content = intro_text.strip()
                 intro.actual_word_count = _wc(intro.content)
                 intro.status = "draft"
-                intro.target_word_count = 800
+                intro.target_word_count = front_matter_target
                 await self.session.flush()
                 await self._snapshot_version(intro, intro.content)
 
@@ -969,7 +1055,7 @@ class GenerationPipeline:
                     spec_dict,
                     summaries,
                     conclusion_purpose=conclusion_purpose,
-                    target_word_count=700,
+                    target_word_count=front_matter_target,
                     style_guidance=style,
                     temperature=self.temperature,
                 )
@@ -988,7 +1074,7 @@ class GenerationPipeline:
                 conclusion.content = conclusion_text.strip()
                 conclusion.actual_word_count = _wc(conclusion.content)
                 conclusion.status = "draft"
-                conclusion.target_word_count = 700
+                conclusion.target_word_count = front_matter_target
                 await self.session.flush()
                 await self._snapshot_version(conclusion, conclusion.content)
 
@@ -1023,9 +1109,9 @@ class GenerationPipeline:
                 continue
             order.append(str(ch.id))
             if ch.chapter_number == 0:
-                parts.append(f"\n\n# Introduction\n\n")
+                parts.append("\n\n# Introduction\n\n")
             elif is_conclusion_title(ch.title):
-                parts.append(f"\n\n# Conclusion\n\n")
+                parts.append("\n\n# Conclusion\n\n")
             else:
                 parts.append(f"\n\n# Chapter {ch.chapter_number}: {ch.title}\n\n")
             parts.append(ch.content)
@@ -1085,10 +1171,12 @@ class GenerationPipeline:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Manuscript validation failed: %s", exc)
 
-        failed_chapters = [c.chapter_number for c in chapters if c.status in ("failed", "needs_review")]
+        failed_chapters = [
+            c.chapter_number for c in chapters if c.status in ("failed", "needs_review")
+        ]
         written = [c for c in chapters if c.content]
-        # Requests served by the offline fallback produced template filler, not
-        # real model prose — surface that honestly instead of declaring success.
+        # Requests served by the offline fallback are disclosed and can never
+        # make a manuscript publication-ready, even when its draft is useful.
         ai_service = getattr(self.engine, "ai", None)
         fallback_units = (
             ai_service.consume_fallback_count(self.wbook.id)
@@ -1100,22 +1188,41 @@ class GenerationPipeline:
                 "Book %s: %d generation request(s) served by offline fallback",
                 self.wbook.id, fallback_units,
             )
-        # Mirror the intro/conclusion stage: the reserved "Conclusion" chapter
-        # is back matter, not a body chapter.
-        body_numbers = [
-            c.chapter_number
-            for c in chapters
+
+        body_written = [
+            c for c in written
             if c.chapter_number >= 1 and not is_conclusion_title(c.title)
         ]
-        last_body = max(body_numbers) if body_numbers else 0
-        body_written = [c for c in written if 1 <= c.chapter_number <= last_body]
+        expected_body_count = int(spec_dict.get("chapter_count") or len(body_written))
+        intro_written = any(c.chapter_number == 0 for c in written)
+        conclusion_written = any(is_conclusion_title(c.title) for c in written)
+        target_words = int(spec_dict.get("target_word_count") or self.wbook.target_word_count or 0)
+        minimum_words, maximum_words = _word_count_range(target_words)
+        word_count_within_target = minimum_words <= total_words <= maximum_words
+        required_scores = {key for key, _threshold in _SCORE_KEYS}
+        chapter_validations_complete = bool(body_written) and all(
+            c.validation_result
+            and not c.validation_result.get("validation_unavailable")
+            and all(c.validation_result.get(key) is not None for key in required_scores)
+            and c.validation_result.get("passed") is True
+            for c in body_written
+        )
+        manuscript_complete = (
+            len(body_written) == expected_body_count and intro_written and conclusion_written
+        )
         report = {
             "total_word_count": total_words,
-            "target_word_count": self.wbook.target_word_count,
+            "target_word_count": target_words,
+            "minimum_acceptable_word_count": minimum_words,
+            "maximum_acceptable_word_count": maximum_words,
+            "word_count_within_target": word_count_within_target,
             "chapter_count": len(body_written),
+            "expected_chapter_count": expected_body_count,
             "chapters_written": len(written),
-            "introduction_written": any(c.chapter_number == 0 for c in written),
-            "conclusion_written": any(c.chapter_number > last_body for c in written),
+            "introduction_written": intro_written,
+            "conclusion_written": conclusion_written,
+            "manuscript_complete": manuscript_complete,
+            "chapter_validations_complete": chapter_validations_complete,
             "failed_or_review_chapters": failed_chapters,
             "fallback_generated_units": fallback_units,
             "degraded": bool(fallback_units),
@@ -1124,14 +1231,19 @@ class GenerationPipeline:
         }
         self.wbook.quality_report = report
 
-        ready = bool(quality.get("ready_for_formatting", True)) and not any(
-            c.status == "failed" for c in chapters
+        quality_ready = bool(quality) and quality.get("ready_for_formatting") is True
+        ready = (
+            quality_ready
+            and manuscript_complete
+            and chapter_validations_complete
+            and word_count_within_target
+            and not failed_chapters
+            and not fallback_units
         )
-        if failed_chapters and not ready:
+        if any(c.status == "failed" for c in chapters):
             self.wbook.status = "revision_required"
             self.wbook.current_step = "writing"
-        elif fallback_units:
-            # Template filler in the manuscript: never present it as ready.
+        elif not ready:
             self.wbook.status = "needs_review"
             self.wbook.current_step = "writing"
         else:
@@ -1209,7 +1321,11 @@ async def regenerate_chapter(
     )
 
     plans = list(blueprint.chapters or [])
-    plan = plans[chapter_number - 1] if chapter_number - 1 < len(plans) else {"title": chapter.title}
+    plan = (
+        plans[chapter_number - 1]
+        if chapter_number - 1 < len(plans)
+        else {"title": chapter.title}
+    )
     style = await get_style_guidance(session, wbook.id)
 
     # Continuity: summary of the previous body chapter.

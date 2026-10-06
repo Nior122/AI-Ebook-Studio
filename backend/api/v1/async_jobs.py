@@ -7,11 +7,12 @@ id. Clients poll ``GET /api/v1/jobs/{job_id}`` for progress.
 
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, status
 
-from api.dependencies import CurrentUser, DatabaseSession
+from api.dependencies import CurrentUser
 from schemas.jobs import JobResponse
 from services.jobs import enqueue_and_schedule
 from services.jobs.enums import JobStatus, JobType
@@ -131,7 +132,7 @@ async def marketing_async(
 async def cover_async(
     book_id: UUID,
     user: CurrentUser,
-    component: str = "all",
+    component: Literal["front", "back", "spine", "all"] = "all",
 ) -> JobResponse:
     """Schedule a cover design generation job."""
     handle = await enqueue_and_schedule(
@@ -166,17 +167,19 @@ async def translate_async(
     source_lang: str,
     target_lang: str,
     user: CurrentUser,
+    translation_id: UUID | None = None,
 ) -> JobResponse:
-    """Schedule a translation job for the given book."""
-    handle = await enqueue_and_schedule(
-        JobType.TRANSLATION,
-        {
-            "user_id": str(user.id),
-            "book_id": str(book_id),
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-        },
-    )
+    """Schedule a new or resumable translation edition."""
+    payload: dict[str, object] = {
+        "user_id": str(user.id),
+        "book_id": str(book_id),
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+    }
+    if translation_id is not None:
+        payload["translation_id"] = str(translation_id)
+
+    handle = await enqueue_and_schedule(JobType.TRANSLATION, payload)
     return JobResponse(
         id=handle.id,
         job_type=handle.job_type,

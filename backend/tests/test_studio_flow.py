@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -88,7 +88,11 @@ async def studio_client() -> AsyncIterator[AsyncClient]:
     register_all_handlers()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Forwarded-For": str(uuid4())},
+    ) as client:
         yield client
 
     await dispose_engine()
@@ -125,6 +129,75 @@ async def _wait_job(client: AsyncClient, token: str, job_id: str, timeout: float
             return last
         await asyncio.sleep(0.15)
     raise AssertionError(f"Job did not finish in time. Last state: {last}")
+
+
+async def test_duplicate_project_titles_autosave_to_their_own_books(
+    studio_client: AsyncClient,
+) -> None:
+    """Autosave resolves by the persisted relationship, never by title/order."""
+    headers = _auth(await _register(studio_client))
+    workspaces = await studio_client.get("/api/v1/workspaces", headers=headers)
+    assert workspaces.status_code == 200
+    workspace_id = workspaces.json()[0]["id"]
+
+    project_books: list[tuple[str, str, str]] = []
+    for suffix in ("first", "second"):
+        project_response = await studio_client.post(
+            "/api/v1/projects",
+            json={
+                "workspace_id": workspace_id,
+                "name": "Same title",
+                "title": "Same title",
+                "description": suffix,
+            },
+            headers=headers,
+        )
+        assert project_response.status_code == 201, project_response.text
+        project_id = project_response.json()["id"]
+
+        primary_book = await studio_client.post(
+            f"/api/v1/projects/{project_id}/book",
+            json={"title": "Same title", "description": suffix},
+            headers=headers,
+        )
+        assert primary_book.status_code == 201, primary_book.text
+        writing_book_id = primary_book.json()["metadata_json"]["writing_book_id"]
+        assert writing_book_id
+
+        chapters = await studio_client.get(
+            f"/api/v1/book-writing/books/{writing_book_id}/chapters",
+            headers=headers,
+        )
+        assert chapters.status_code == 200, chapters.text
+        project_books.append((project_id, writing_book_id, chapters.json()[0]["id"]))
+
+    first, second = project_books
+    assert first[1] != second[1]
+    first_content = "First book's private edited content."
+    second_content = "Second book's separate edited content."
+
+    for project_id, chapter_id, content in (
+        (first[0], first[2], first_content),
+        (second[0], second[2], second_content),
+    ):
+        saved = await studio_client.put(
+            f"/api/v1/projects/{project_id}/autosave",
+            json={"chapters": {chapter_id: content}},
+            headers=headers,
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["saved_chapters"] == 1
+
+    for writing_book_id, expected in (
+        (first[1], first_content),
+        (second[1], second_content),
+    ):
+        chapters = await studio_client.get(
+            f"/api/v1/book-writing/books/{writing_book_id}/chapters",
+            headers=headers,
+        )
+        assert chapters.status_code == 200, chapters.text
+        assert chapters.json()[0]["content"] == expected
 
 
 async def test_studio_full_flow(studio_client: AsyncClient) -> None:

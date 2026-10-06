@@ -63,10 +63,16 @@ export const jobsApi = {
   startCover(bookId: string, component: string = "all"): Promise<JobResponse> {
     return apiClient.post<JobResponse>(`/async/books/${bookId}/cover?component=${component}`, {});
   },
-  startTranslation(bookId: string, sourceLang: string, targetLang: string): Promise<JobResponse> {
+  startTranslation(
+    bookId: string,
+    sourceLang: string,
+    targetLang: string,
+    translationId?: string,
+  ): Promise<JobResponse> {
+    const resume = translationId ? `&translation_id=${encodeURIComponent(translationId)}` : "";
     return apiClient.post<JobResponse>(
-      `/async/books/${bookId}/translate?source_lang=${sourceLang}&target_lang=${targetLang}`,
-      {}
+      `/async/books/${bookId}/translate?source_lang=${encodeURIComponent(sourceLang)}&target_lang=${encodeURIComponent(targetLang)}${resume}`,
+      {},
     );
   },
 };

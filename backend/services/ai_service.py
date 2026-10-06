@@ -30,11 +30,9 @@ import structlog
 
 from core.config import Settings, get_settings
 from providers.ai.base import (
-    AIProvider,
     AIProviderError,
     AIResponse,
     ModelCapability,
-    ModelNotFoundError,
     ProviderConfigurationError,
     UnsupportedCapabilityError,
 )
@@ -109,7 +107,9 @@ class AIService:
         resolved_model, resolved_provider = self._resolve(model, provider)
 
         capability_reqs = required_capabilities or (
-            [ModelCapability.TEXT_GENERATION] if not json_mode else [ModelCapability.STRUCTURED_OUTPUT]
+            [ModelCapability.TEXT_GENERATION]
+            if not json_mode
+            else [ModelCapability.STRUCTURED_OUTPUT]
         )
         self._validate_capabilities(resolved_model, resolved_provider, capability_reqs)
 
@@ -215,7 +215,9 @@ class AIService:
                 return fallback
         if last_exc:
             raise last_exc
-        raise ProviderConfigurationError("Structured generation failed.", provider=resolved_provider)
+        raise ProviderConfigurationError(
+            "Structured generation failed.", provider=resolved_provider
+        )
 
     async def stream_text(
         self,
@@ -347,14 +349,19 @@ class AIService:
 
         if last_exc:
             raise last_exc
-        raise ProviderConfigurationError("Generation failed with no provider.", provider=primary_provider)
+        raise ProviderConfigurationError(
+            "Generation failed with no provider.", provider=primary_provider
+        )
 
     async def _fallback(
         self, request: Any, primary_provider: str, task: str | None
     ) -> AIResponse | None:
         """Try the configured/next available provider."""
         order: list[str] = []
-        if self.settings.ai_fallback_provider and self.settings.ai_fallback_provider != primary_provider:
+        if (
+            self.settings.ai_fallback_provider
+            and self.settings.ai_fallback_provider != primary_provider
+        ):
             order.append(self.settings.ai_fallback_provider)
         order += [p for p in self._registry.available() if p != primary_provider]
 
@@ -445,6 +452,11 @@ class AIService:
 
 
 # lazy singleton
-def get_ai_service(settings: Settings | None = None) -> AIService:
-    """Return a singleton :class:`AIService` backed by application settings."""
-    return AIService(settings=settings)
+def get_ai_service() -> AIService:
+    """Return an :class:`AIService` backed by the cached application settings.
+
+    This factory is also used as a FastAPI dependency. Keeping request-scoped
+    settings out of its signature prevents FastAPI from treating the optional
+    ``Settings`` argument as a second request-body field.
+    """
+    return AIService()

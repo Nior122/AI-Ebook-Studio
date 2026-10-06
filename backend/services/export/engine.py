@@ -20,10 +20,13 @@ from core.exceptions import ResourceNotFoundError, ValidationAppError
 from models.accounts import User
 from models.assets import BookSettings, DocumentAsset
 from models.book_writing import WritingBook, WritingChapter
-from models.enums import DocumentAssetType
 from providers.storage.base import StorageObject
 from providers.storage.factory import get_storage_provider
-from services.rbac_service import require_workspace_permission
+from services.book_identity import (
+    get_owned_writing_book,
+    get_owned_writing_book_by_project_book_id,
+    require_project_book_id,
+)
 
 
 def _slugify_filename(text: str) -> str:
@@ -58,6 +61,59 @@ def _split_heading_from_paragraph(para: str) -> tuple[str | None, str]:
     return None, para
 
 
+_REPORTLAB_FONT_FAMILIES = {
+    "times": ("Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"),
+    "helvetica": ("Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"),
+    "courier": ("Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"),
+}
+_REPORTLAB_FONT_ALIASES = {
+    "times": "times",
+    "timesroman": "times",
+    "timesnewroman": "times",
+    "georgia": "times",
+    "garamond": "times",
+    "palatino": "times",
+    "baskerville": "times",
+    "helvetica": "helvetica",
+    "arial": "helvetica",
+    "inter": "helvetica",
+    "calibri": "helvetica",
+    "aptos": "helvetica",
+    "verdana": "helvetica",
+    "courier": "courier",
+    "couriernew": "courier",
+}
+
+
+def _reportlab_font_name(
+    requested: str | None,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+) -> str:
+    """Resolve common UI font families to embeddable ReportLab base fonts."""
+    name = (requested or "").strip()
+    normalized = re.sub(r"[^a-z0-9]", "", name.casefold())
+    weight_bold = bold or normalized.endswith("bold")
+    weight_italic = italic or normalized.endswith(("italic", "oblique"))
+    family_name = re.sub(r"(bold|italic|oblique|regular)$", "", normalized)
+    family = _REPORTLAB_FONT_ALIASES.get(family_name)
+    if family is not None:
+        variant_index = (1 if weight_bold else 0) + (2 if weight_italic else 0)
+        return _REPORTLAB_FONT_FAMILIES[family][variant_index]
+
+    # Allow explicitly registered ReportLab fonts, but never pass an arbitrary
+    # UI family name through to ParagraphStyle (ReportLab raises at render time).
+    from reportlab.pdfbase import pdfmetrics
+
+    registered = {font.casefold(): font for font in pdfmetrics.getRegisteredFontNames()}
+    if name.casefold() in registered:
+        return registered[name.casefold()]
+    family = _REPORTLAB_FONT_FAMILIES["helvetica"]
+    variant_index = (1 if weight_bold else 0) + (2 if weight_italic else 0)
+    return family[variant_index]
+
+
 # ---------------------------------------------------------------------------
 # Format builders — each returns (bytes, mime_type, file_extension)
 # ---------------------------------------------------------------------------
@@ -72,9 +128,8 @@ def _build_docx(
 ) -> tuple[bytes, str, str]:
     """Build a DOCX file from book chapters using python-docx."""
     from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.section import WD_SECTION
+    from docx.shared import Inches, Pt
 
     doc = Document()
 
@@ -257,17 +312,15 @@ def _build_pdf(
     include_toc: bool,
 ) -> tuple[bytes, str, str]:
     """Build a PDF file from book chapters using reportlab."""
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
     from reportlab.lib.pagesizes import inch
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import inch as u_inch
     from reportlab.platypus import (
-        SimpleDocTemplate,
-        Paragraph,
-        Spacer,
         PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
     )
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-    from reportlab.lib import colors
 
     # Page size from settings.
     trim_map = {
@@ -304,8 +357,13 @@ def _build_pdf(
 
     # Styles.
     styles = getSampleStyleSheet()
-    body_font = (settings.body_font if settings and settings.body_font else "Helvetica")
-    heading_font = (settings.heading_font if settings and settings.heading_font else "Helvetica-Bold")
+    body_font = _reportlab_font_name(
+        settings.body_font if settings else "Helvetica"
+    )
+    heading_font = _reportlab_font_name(
+        settings.heading_font if settings else "Helvetica",
+        bold=True,
+    )
     body_size = (settings.body_font_size if settings and settings.body_font_size else 11)
     line_spacing = float(settings.line_spacing if settings and settings.line_spacing else 1.5)
     para_spacing = float(settings.paragraph_spacing if settings and settings.paragraph_spacing else 8)
@@ -407,7 +465,6 @@ def _build_epub(
     """Build an EPUB file from book chapters using ebooklib."""
     from ebooklib import epub
 
-    slug = _slugify_filename(book.title)
     epub_book = epub.EpubBook()
     epub_book.set_identifier(f"book-{book.id}")
     epub_book.set_title(book.title)
@@ -549,12 +606,9 @@ class ExportEngine:
                 f"Unsupported export format '{fmt}'. Choose from: {', '.join(_FORMAT_BUILDERS)}."
             )
 
-        # Load book + ownership check.
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.deleted_at is not None:
-            raise ResourceNotFoundError("Book not found.")
-        if book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        # Load the writing book and use its explicit link for project-level records.
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
 
         # Load chapters in order.
         chapter_result = await session.execute(
@@ -571,7 +625,7 @@ class ExportEngine:
         from models.assets import BookSettings as BSModel
 
         settings_result = await session.execute(
-            select(BSModel).where(BSModel.book_id == book_id),
+            select(BSModel).where(BSModel.book_id == project_book_id),
         )
         settings = settings_result.scalar_one_or_none()
 
@@ -589,7 +643,7 @@ class ExportEngine:
         existing_result = await session.execute(
             select(DocumentAsset)
             .where(
-                DocumentAsset.book_id == book_id,
+                DocumentAsset.book_id == project_book_id,
                 DocumentAsset.asset_type == fmt.upper(),
                 DocumentAsset.deleted_at.is_(None),
             )
@@ -608,7 +662,8 @@ class ExportEngine:
                 data=file_bytes,
                 content_type=mime_type,
                 metadata={
-                    "book_id": str(book_id),
+                    "book_id": str(project_book_id),
+                    "writing_book_id": str(book_id),
                     "format": fmt,
                     "version": str(next_version),
                     "word_count": str(sum(c.actual_word_count for c in chapters)),
@@ -622,7 +677,7 @@ class ExportEngine:
 
         # Persist DocumentAsset record.
         asset = DocumentAsset(
-            book_id=book_id,
+            book_id=project_book_id,
             asset_type=fmt.upper(),
             file_name=f"{slug}-v{next_version}.{extension}",
             file_url=stored.url,
@@ -643,16 +698,13 @@ class ExportEngine:
         book_id: UUID,
     ) -> list[DocumentAsset]:
         """List all non-deleted export assets for a book."""
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.deleted_at is not None:
-            raise ResourceNotFoundError("Book not found.")
-        if book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
 
         result = await session.execute(
             select(DocumentAsset)
             .where(
-                DocumentAsset.book_id == book_id,
+                DocumentAsset.book_id == project_book_id,
                 DocumentAsset.deleted_at.is_(None),
                 DocumentAsset.asset_type.in_(["DOCX", "PDF", "EPUB"]),
             )
@@ -665,13 +717,17 @@ class ExportEngine:
         session: AsyncSession,
         user: User,
         asset_id: UUID,
+        writing_book_id: UUID,
     ) -> DocumentAsset:
-        """Retrieve a single export asset with ownership check."""
+        """Retrieve an export only through its owning writing-book route."""
         asset = await session.get(DocumentAsset, asset_id)
         if asset is None or asset.deleted_at is not None:
             raise ResourceNotFoundError("Export not found.")
-        book = await session.get(WritingBook, asset.book_id)
-        if book is None or book.user_id != user.id:
+        try:
+            book = await get_owned_writing_book_by_project_book_id(session, user, asset.book_id)
+        except ResourceNotFoundError as exc:
+            raise ResourceNotFoundError("Export not found.") from exc
+        if book.id != writing_book_id:
             raise ResourceNotFoundError("Export not found.")
         return asset
 
@@ -680,9 +736,10 @@ class ExportEngine:
         session: AsyncSession,
         user: User,
         asset_id: UUID,
+        writing_book_id: UUID,
     ) -> None:
         """Soft-delete an export asset and remove the stored file."""
-        asset = await self.get_export(session, user, asset_id)
+        asset = await self.get_export(session, user, asset_id, writing_book_id)
         storage = get_storage_provider()
         try:
             await storage.delete(asset.storage_key)

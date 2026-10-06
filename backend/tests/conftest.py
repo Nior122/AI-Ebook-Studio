@@ -1,9 +1,9 @@
 """Shared test fixtures for Stage 4 API tests."""
 
+import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-
-import os
+from uuid import uuid4
 
 # Job-runner sessions use the GLOBAL engine (AsyncSessionLocal), so point it at
 # a SQLite file BEFORE any app import. In-memory engines can't be shared across
@@ -55,7 +55,11 @@ async def client(
 
     app.dependency_overrides[get_db_session] = override_get_db_session
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Forwarded-For": str(uuid4())},
+    ) as test_client:
         yield test_client
 
     app.dependency_overrides.clear()

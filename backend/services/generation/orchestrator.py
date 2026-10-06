@@ -22,7 +22,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.exceptions import ResourceNotFoundError
+from core.exceptions import ConflictError, ResourceNotFoundError
 from models.accounts import User as UserModel
 from models.assets import BookSettings
 from models.book_writing import (
@@ -33,12 +33,12 @@ from models.project import Book, Project
 from schemas.book_setup import BookSetupRequest
 from schemas.projects import BookCreateRequest
 from services import book_service as project_book_service
+from services import studio_service
 from services.book_writing.engine import BookWritingEngine
+from services.events import publish_project_event
 from services.generation.pipeline import GenerationPipeline
 from services.jobs.runner import ProgressCallback
 from services.workspace_service import get_or_create_default_workspace
-from services import studio_service
-from services.events import publish_project_event
 
 logger = logging.getLogger("api.generation.orchestrator")
 
@@ -121,29 +121,26 @@ async def _get_or_create(
         wbook = await session.get(WritingBook, UUID(str(existing_writing_book_id)))
         if wbook is None or wbook.deleted_at is not None or wbook.user_id != user.id:
             raise ResourceNotFoundError("WritingBook not found for existing book")
-        book_result = await session.execute(
-            select(Book).where(
-                Book.metadata_json["writing_book_id"].as_string() == str(wbook.id)
-            )
-        )
-        book = book_result.scalars().first()
+        if wbook.project_book_id is not None:
+            book = await session.get(Book, wbook.project_book_id)
 
     # Resume path 2: primary book id.
     if wbook is None and payload.get("book_id"):
         book = await session.get(Book, UUID(str(payload["book_id"])))
         if book is not None:
-            wb_id = (book.metadata_json or {}).get("writing_book_id")
-            if wb_id:
-                wbook = await session.get(WritingBook, UUID(str(wb_id)))
-            elif setup is not None:
-                wb_result = await session.execute(
-                    select(WritingBook).where(
-                        WritingBook.user_id == user.id,
-                        WritingBook.title == setup.details.title,
-                        WritingBook.deleted_at.is_(None),
-                    )
+            wbook_result = await session.execute(
+                select(WritingBook).where(
+                    WritingBook.project_book_id == book.id,
+                    WritingBook.user_id == user.id,
+                    WritingBook.deleted_at.is_(None),
                 )
-                wbook = wb_result.scalar()
+            )
+            wbook = wbook_result.scalar_one_or_none()
+            if wbook is None:
+                raise ConflictError(
+                    "This project book has no unambiguous writing-book link. "
+                    "Repair the relationship before resuming generation."
+                )
 
     if wbook is not None:
         if book is None:
@@ -188,14 +185,14 @@ async def _get_or_create(
 
     wb_result = await session.execute(
         select(WritingBook).where(
+            WritingBook.project_book_id == book.id,
             WritingBook.user_id == user.id,
-            WritingBook.title == book.title,
             WritingBook.deleted_at.is_(None),
-        ).order_by(WritingBook.created_at.desc())
+        )
     )
-    wbook = wb_result.scalar()
+    wbook = wb_result.scalar_one_or_none()
     if wbook is None:
-        raise RuntimeError("WritingBook was not created by create_primary_book")
+        raise RuntimeError("WritingBook relationship was not created with the project book")
     return user, project, book, wbook, setup
 
 

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.session import AsyncSessionLocal
 from models.operations import Job
 from models.project import Book
+from services.book_identity import resolve_project_book_id
 from services.jobs.enums import JobStatus, JobType
 from services.jobs.queue import JobHandle, get_job_queue
 
@@ -51,8 +52,7 @@ async def _persist_job(handle: JobHandle, db: AsyncSession) -> Job:
         payload = handle.payload
         user_id_str = payload.get("user_id")
         user_id = UUID(str(user_id_str)) if user_id_str else None
-        book_id_str = payload.get("book_id")
-        book_id = UUID(str(book_id_str)) if book_id_str else None
+        book_id = await resolve_project_book_id(db, payload.get("book_id"))
 
         job = Job(
             id=handle.id,
@@ -122,19 +122,11 @@ async def _job_project_id(payload: dict[str, object]) -> UUID | None:
         return None
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(Book).where(Book.id == UUID(str(raw_book))))
-            book = result.scalar_one_or_none()
-            if book is not None:
-                return book.project_id
-            # Writing-book jobs carry the WritingBook id; the primary Book
-            # records it in metadata_json.writing_book_id.
-            result = await session.execute(
-                select(Book).where(
-                    Book.metadata_json["writing_book_id"].as_string() == str(raw_book)
-                )
-            )
-            book = result.scalar_one_or_none()
-            return book.project_id if book is not None else None
+            project_book_id = await resolve_project_book_id(session, raw_book)
+            if project_book_id is None:
+                return None
+            project_book = await session.get(Book, project_book_id)
+            return project_book.project_id if project_book is not None else None
     except Exception:
         return None
 
@@ -144,7 +136,12 @@ def _friendly_job_error(job_type: JobType, raw: str | None) -> str:
     message = (raw or "").strip()
     if not message:
         return "The operation did not complete. Check your configuration and retry."
-    if "ProviderConfigurationError" in message or "api key" in message.lower() or "not configured" in message.lower() or "is not registered" in message:
+    if (
+        "ProviderConfigurationError" in message
+        or "api key" in message.lower()
+        or "not configured" in message.lower()
+        or "is not registered" in message
+    ):
         return (
             "This operation needs an AI provider key. Add one in Settings → AI "
             "(or set it in the Book Setup wizard), then retry. The local engine "
@@ -189,6 +186,7 @@ async def _create_auto_restore_point(handle: JobHandle) -> None:
                 )
     except Exception:
         logger.exception("Failed to create auto restore point for job %s", handle.id)
+        raise
 
 
 async def _notify_terminal(handle: JobHandle) -> None:
@@ -280,13 +278,11 @@ async def run_job(handle: JobHandle) -> None:
         if project_id is not None:
             publish_project_event(str(project_id), "job.progress", event)
 
-    db_stored = False
     try:
         await queue.update_status(handle.id, JobStatus.RUNNING)
         async with AsyncSessionLocal() as session:
             handle.started_at = datetime.now(UTC)
             await _persist_job(handle, session)
-            db_stored = True
 
             result = await handler(session, handle.id, handle.payload, update_progress)
 
@@ -315,7 +311,7 @@ async def run_job(handle: JobHandle) -> None:
 
 def _enqueue(
     job_type: JobType, payload: dict[str, object] | None = None
-) -> "Awaitable[JobHandle]":
+) -> Awaitable[JobHandle]:
     """Build an awaitable that enqueues a job and schedules its execution."""
     queue = get_job_queue()
 

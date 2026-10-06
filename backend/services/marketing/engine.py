@@ -14,9 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.exceptions import ResourceNotFoundError
 from models.accounts import User
 from models.assets import MarketingAsset
-from models.book_writing import WritingBook, WritingChapter
+from models.book_writing import WritingChapter
 from models.enums import MarketingAssetType
 from services.ai_service import AIService as AISvc
+from services.book_identity import (
+    get_owned_writing_book,
+    get_owned_writing_book_by_project_book_id,
+    require_project_book_id,
+)
 
 MARKETING_ASSET_CONFIGS = {
     MarketingAssetType.AMAZON_DESCRIPTION: {
@@ -136,11 +141,8 @@ class MarketingEngine:
         if config is None:
             raise ResourceNotFoundError(f"Marketing asset type '{asset_type_str}' not supported.")
 
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.deleted_at is not None:
-            raise ResourceNotFoundError("Book not found.")
-        if book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
 
         chapters_result = await session.execute(
             select(WritingChapter)
@@ -179,7 +181,7 @@ Generate a high-quality {config['label'].lower()} for this book."""
         # Delete previous asset of same type for this book.
         prev_result = await session.execute(
             select(MarketingAsset).where(
-                MarketingAsset.book_id == book_id,
+                MarketingAsset.book_id == project_book_id,
                 MarketingAsset.asset_type == asset_type.value,
             ),
         )
@@ -187,7 +189,7 @@ Generate a high-quality {config['label'].lower()} for this book."""
             await session.delete(prev)
 
         asset = MarketingAsset(
-            book_id=book_id,
+            book_id=project_book_id,
             asset_type=asset_type.value,
             content=result.text,
         )
@@ -203,11 +205,10 @@ Generate a high-quality {config['label'].lower()} for this book."""
         book_id: UUID,
     ) -> list[MarketingAsset]:
         """List all generated marketing assets for a book."""
-        book = await session.get(WritingBook, book_id)
-        if book is None or book.user_id != user.id:
-            raise ResourceNotFoundError("Book not found.")
+        book = await get_owned_writing_book(session, user, book_id)
+        project_book_id = require_project_book_id(book)
         result = await session.execute(
-            select(MarketingAsset).where(MarketingAsset.book_id == book_id),
+            select(MarketingAsset).where(MarketingAsset.book_id == project_book_id),
         )
         return list(result.scalars())
 
@@ -216,13 +217,17 @@ Generate a high-quality {config['label'].lower()} for this book."""
         session: AsyncSession,
         user: User,
         asset_id: UUID,
+        writing_book_id: UUID,
     ) -> MarketingAsset:
-        """Get a single marketing asset with ownership check."""
+        """Get a marketing asset only through its owning writing-book route."""
         asset = await session.get(MarketingAsset, asset_id)
         if asset is None or asset.deleted_at is not None:
             raise ResourceNotFoundError("Marketing asset not found.")
-        book = await session.get(WritingBook, asset.book_id)
-        if book is None or book.user_id != user.id:
+        try:
+            book = await get_owned_writing_book_by_project_book_id(session, user, asset.book_id)
+        except ResourceNotFoundError as exc:
+            raise ResourceNotFoundError("Marketing asset not found.") from exc
+        if book.id != writing_book_id:
             raise ResourceNotFoundError("Marketing asset not found.")
         return asset
 
@@ -231,9 +236,10 @@ Generate a high-quality {config['label'].lower()} for this book."""
         session: AsyncSession,
         user: User,
         asset_id: UUID,
+        writing_book_id: UUID,
     ) -> None:
         """Delete a marketing asset."""
-        asset = await self.get_asset(session, user, asset_id)
+        asset = await self.get_asset(session, user, asset_id, writing_book_id)
         await session.delete(asset)
         await session.commit()
 
