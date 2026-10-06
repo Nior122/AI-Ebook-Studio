@@ -82,6 +82,7 @@ def test_production_settings_accept_secure_configuration() -> None:
         secret_key="AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production",
         jwt_secret="JwtEncryptionKey-3aMn!Qv8bT2xR7sL2026-Production",
         cors_origins=["https://studio.example.com"],
+        app_base_url="https://studio.example.com",
     )
     assert settings.app_env == "PRODUCTION"
 
@@ -93,6 +94,8 @@ def test_production_settings_accept_secure_configuration() -> None:
         ({"jwt_secret": "too-short"}, "JWT_SECRET"),
         ({"jwt_secret": "AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production"}, "different values"),
         ({"debug": True}, "DEBUG must be false"),
+        ({"app_base_url": "http://studio.example.com"}, "APP_BASE_URL"),
+        ({"app_base_url": "https://localhost:3000"}, "APP_BASE_URL"),
         ({"cors_origins": ["*"]}, "wildcard origin"),
         ({"cors_origins": ["http://studio.example.com"]}, "HTTPS"),
     ],
@@ -108,6 +111,7 @@ def test_production_settings_reject_unsafe_configuration(
         "secret_key": "AppSigningSecret-8yQ4!sfvR39kL0mN2026-Production",
         "jwt_secret": "JwtEncryptionKey-3aMn!Qv8bT2xR7sL2026-Production",
         "cors_origins": ["https://studio.example.com"],
+        "app_base_url": "https://studio.example.com",
     }
     config.update(overrides)
 
@@ -128,16 +132,20 @@ def test_render_blueprint_uses_production_safe_settings() -> None:
     assert env["JWT_SECRET"]["generateValue"] is True
     assert env["APP_ENV"]["value"] == "production"
     assert str(env["DEBUG"]["value"]).lower() == "false"
+    assert env["CORS_ORIGINS"]["sync"] is False
+    assert env["APP_BASE_URL"]["sync"] is False
+    assert service["preDeployCommand"] == "alembic upgrade head"
 
     settings = Settings(
         _env_file=None,
         app_env=env["APP_ENV"]["value"],
         debug=env["DEBUG"]["value"],
-        cors_origins=env["CORS_ORIGINS"]["value"],
+        cors_origins="https://studio.example.com",
+        app_base_url="https://studio.example.com",
         secret_key="Production-Secret-Key-Generated-Randomly-2026-91a7!zC",
         jwt_secret="Different-JWT-Encryption-Secret-Generated-2026-6b2d!yQ",
     )
-    assert settings.cors_origins == ["https://ai-ebook-studio.pages.dev"]
+    assert settings.cors_origins == ["https://studio.example.com"]
 
 
 # ---------------------------------------------------------------------------

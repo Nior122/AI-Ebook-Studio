@@ -1,102 +1,64 @@
 # AI Ebook Studio — Production Readiness Report
 
-**Date:** 2026-08-01 · **Branch:** `master` · **Baseline:** `96a6546` (remote HEAD) · **Hardening commit:** `1e95cf6` (local, **not yet pushed**)
+**Snapshot date:** 2026-10-06
+**Branch:** `arena/01a10cb1-ai-ebook-studio`
+**Pull request:** [#1](https://github.com/Nior122/AI-Ebook-Studio/pull/1) (draft, targets `master`)
+**Audit source:** `docs/PROJECT_AUDIT.md` and `docs/IMPLEMENTATION_ROADMAP.md`
 
-## 1. Verdict
+## Verdict
 
-**Ready to deploy** once the two manual steps below are done. The full backend
-suite passes **148/148 tests** (including 7 new hardening tests), all 14 Alembic
-migrations run clean on a fresh SQLite, all frontend `.ts/.tsx` files parse
-cleanly with tree-sitter, and the static security scans below found no
-hardcoded secrets, raw SQL, subprocess use, or dangerously-set HTML sinks.
+**Not yet confirmed ready for production deployment.** The product has useful, locally verified deployment artifacts, but a remote Cloudflare Workers Builds check is failing and its account-side error log is not accessible from GitHub. No production Worker or Render service was deployed from this checkout.
 
-> **Manual steps before/at deploy**
-> 1. Push `1e95cf6` (sandbox has no GitHub credentials — PAT was revoked as advised).
-> 2. Cloudflare Workers Builds deploy (repo is configured: root dir `frontend`,
->    build `npm run build` → `opennextjs-cloudflare build`, deploy
->    `npx wrangler deploy`; `wrangler.toml` uses `main = ".open-next/worker.js"`
->    + `nodejs_compat`).
+### Latest remote evidence
 
-## 2. What was audited (and verified clean)
+- GitHub Actions run `37408649550` passed both backend and frontend jobs on pushed commit `c1af346`.
+- The Cloudflare Workers Builds check for that commit failed with build ID `51c9ff4a-2c55-4aa2-af24-42b75be46633`. GitHub's check summary contains only a link to the private Cloudflare Dashboard. The failure reason is therefore **unknown**, not assumed to be fixed by local reproduction.
+- Local reproduction found a recursive OpenNext command and fixed it; the remote Cloudflare check still failed afterward. A further local review found missing OpenNext `ASSETS` and `WORKER_SELF_REFERENCE` bindings. Those follow-up changes have now been locally validated and require a fresh remote check.
 
-| Area | Finding |
-|---|---|
-| Hardcoded secrets | `git grep` for `sk-…`, `pk_test_…`, `AIza…`, `ghp_…`, `AKIA…` across tracked files → **none** (`.env.example` files contain placeholders only) |
-| Raw SQL / subprocess | No `subprocess`/`os.system` anywhere; the only `text("SELECT 1")` calls are the new health probes. All queries go through SQLAlchemy ORM |
-| XSS sinks | No `dangerouslySetInnerHTML` / `v-html`. `markdown.ts` escapes attribute values (`escapeHtml` on `src`/`alt`/`href`) before injecting; the rich editor syncs a user-owned `contentEditable`. Residual (low): `href` escaping doesn't block `javascript:` scheme — see §7 |
-| Command injection | No shell interpolation of user input (no subprocess at all) |
-| Endpoint auth gaps | **Fixed this pass**: `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, and generic `POST /jobs` were unauthenticated. All job routes now require auth + ownership; the generic enqueue endpoint was **removed** (arbitrary `job_type`/payload with no auth) |
-| Request size limits | **Fixed**: 20 MB cap middleware → HTTP 413 (`MAX_REQUEST_BODY_MB`) |
-| Logging | structlog structured logging + request-logging middleware; **fixed**: every response now carries `X-Request-Id` and error payloads include `request_id` for correlation |
-| Indexes | All FK columns indexed via `__table_args__` (`Project.owner_user_id`, `Book.project_id`, `WritingBook.user_id`, `ProjectVersion.project_id`, `Notification.user_id`, `ProjectActivity(project_id, created_at)` composite, `ProjectSettings.project_id` unique, etc.) → **no migration needed** |
-| Health endpoints | **Fixed**: `/api/v1/health` (liveness), `/api/v1/ready` (DB probe, now the Render health check), `/api/v1/system/health` (DB + storage write probe + job queue + version + uptime), `/api/v1/version` |
-| N+1 queries | List endpoints are single-query (`list_projects`, `list_jobs` use one `select` with no per-row sub-queries; `User.profile` is `selectinload`-ed in auth paths) → **no N+1 found** |
+## Local deployment checks
 
-## 3. Background jobs — resilience (this pass)
+On the current working tree:
 
-- **Persistence fallback:** `GET /jobs/{id}` now falls back to the `jobs` table
-  when the in-memory queue no longer holds the job (e.g. after restart).
-- **Stale recovery:** on startup, `recover_stale_jobs()` marks PENDING/QUEUED/
-  RUNNING rows FAILED with "Interrupted by server restart — please retry".
-- **Ownership:** queue payloads and DB rows are both checked against the caller.
+| Check | Result | Notes |
+|---|---|---|
+| Clean frontend install | **PASS** | `npm ci`; npm currently reports 12 advisories (4 moderate, 8 high, 0 critical). |
+| Frontend tests | **PASS** | 14 tests across 6 files. |
+| Frontend TypeScript | **PASS** | `npm run typecheck`. |
+| Frontend lint | **PASS with existing warnings** | `npm run lint`; includes deprecated `next lint`, `any`, unused state, and `<img>` warnings. |
+| OpenNext production build | **PASS** | `CI=1 npm run build` produces `.open-next/worker.js`. |
+| Wrangler packaging validation | **PASS (dry run only)** | `npx wrangler deploy --dry-run` read 89 static assets and reported both `WORKER_SELF_REFERENCE` and `ASSETS`; no upload was performed. |
+| API rewrite configuration | **PASS** | Three cases verified: local port-8000 fallback, `NEXT_PUBLIC_API_BASE_URL` origin derivation, and `BACKEND_URL` precedence. |
 
-## 4. Authentication model (documented)
+The Next.js standalone trace root is package-local during the OpenNext build so its expected `.next/standalone/.next` layout is preserved. OpenNext's nested Next build is explicitly `npm run build:next`, preventing the previous `npm run build` recursion. CI now runs the actual OpenNext Worker build rather than only `next build`.
 
-- **Frontend:** Clerk (`@clerk/nextjs` middleware protects `/dashboard`,
-  `/book-writing`, `/projects`, `/workspace`, `/new-book`, `/generating`).
-- **Backend:** local JWT accounts (`register`/`login`) are the primary API auth;
-  the studio API also accepts **Clerk JWTs** (`verify_clerk_token` against
-  `CLERK_JWKS_URL`, auto-provisioning a `User` by `clerk_id`) — so a
-  Clerk-only deployment works with zero local passwords.
-- **NextAuth is not used** anywhere in the codebase.
-- **Env vars:** `NEXT_PUBLIC_API_BASE_URL` (frontend → backend, defaults to
-  `/api/v1` same-origin) is the only frontend base-URL var; there is no
-  server-side `API_URL` in use. Clerk vars: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-  + `CLERK_SECRET_KEY` (frontend), `CLERK_PUBLISHABLE_KEY`/`CLERK_SECRET_KEY`/
-  `CLERK_JWKS_URL` (backend, optional).
+## Cloudflare Workers setup
 
-## 5. Environment variables
+`frontend/wrangler.toml` now declares:
 
-- **Canonical template:** root `.env.example` — complete against `Settings`
-  after this pass (added `MAX_REQUEST_BODY_MB`); sectioned by host
-  (Backend/Render, Database/Neon, Frontend/Cloudflare).
-- `backend/.env.example` was aligned with every `Settings` field (added
-  `NVIDIA_NIM_API_KEY`, `CUSTOM_OPENAI_*`, `AI_FALLBACK_PROVIDER/MODEL`,
-  `CLERK_*`, `APP_BASE_URL`, `EMAIL_FROM`, `SMTP_*`, `REQUIRE_EMAIL_VERIFICATION`,
-  `LIBRETRANSLATE_URL`, `RATE_LIMIT_ENABLED`, `MAX_REQUEST_BODY_MB`).
-- Production settings to flip at deploy: `APP_ENV=production`, `DEBUG=false`,
-  strong `SECRET_KEY`/`JWT_SECRET` (Render auto-generate), Neon **non-pooling**
-  connection string, `SMTP_*` for real emails, `NEXT_PUBLIC_API_BASE_URL=https://<backend>.onrender.com/api/v1`.
+- `main = ".open-next/worker.js"` and `nodejs_compat`;
+- `global_fetch_strictly_public` for public server-side fetches;
+- the required OpenNext `ASSETS` binding for `.open-next/assets`;
+- the `WORKER_SELF_REFERENCE` service binding.
 
-## 6. Deployment configuration
+These settings follow the [OpenNext Cloudflare getting-started guide](https://opennext.js.org/cloudflare/get-started). Local `wrangler deploy --dry-run` accepts the config, but only the connected Cloudflare Workers Builds check can verify the account's build/deploy environment. Cloudflare Dashboard environment variables and deployment logs are not accessible in this checkout.
 
-- **Render (backend):** `render.yaml` — health check now `/api/v1/ready`;
-  asyncpg SSL handled (`strip sslmode/channel_binding`, pass via `connect_args`);
-  `AI_DEFAULT_PROVIDER=openrouter` per the latest remote commit.
-- **Cloudflare (frontend):** Workers Builds route; `wrangler.toml` pinned to
-  `.open-next/worker.js` + `nodejs_compat` (remote commit `96a6546` — the
-  stale local copy was replaced, not overwritten).
-- **Storage:** local backend on Render disk (exports/images); S3/R2 switches
-  are pre-wired via `STORAGE_PROVIDER`.
+### Required dashboard values
 
-## 7. Residual recommendations (non-blocking)
+Set the following in the Cloudflare Workers Builds environment, as appropriate for both **build time** and **Worker runtime**:
 
-1. **`javascript:` URL scheme in markdown links** — `escapeHtml` prevents
-   attribute breakout; add a scheme allowlist (`http`, `https`, `mailto`) in
-   `frontend/lib/markdown.ts` for defense in depth.
-2. **API cache headers** — API responses are authenticated/private and uncached
-   by design; if any public read route appears later, add `Cache-Control`.
-3. **Job queue durability** — jobs are persisted and recoverable, but a
-   Postgres-backed queue (e.g. `arq`) would allow multi-instance workers if
-   the single Render instance outgrows itself.
-4. **Rate limiting** covers auth endpoints; consider extending to job-creation
-   paths if abuse is observed.
+- `NEXT_PUBLIC_API_BASE_URL=https://<backend>.onrender.com/api/v1`
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=<Clerk publishable key>`
+- `CLERK_SECRET_KEY=<Clerk secret>` (store as a secret; never commit it)
+- `BACKEND_URL=https://<backend>.onrender.com` is optional when the public API base URL is set; when provided, it should be the backend origin without `/api/v1`.
 
-## 8. Evidence
+Actual values are not present in the repository and must be configured by the deployment owner. The repository's `wrangler.toml` comments document the dashboard build command (`npm run build`) and deploy command (`npx wrangler deploy`).
 
-- Backend: `pytest` → **148 passed** (0 failures), incl. `test_prod_hardening.py` (7).
-- Migrations: 14/14 clean on fresh SQLite; job table writes verified in tests.
-- Frontend: `scripts/verify_frontend.py` — all files parse, no orphan
-  components (dynamic imports tracked), 24 routes.
-- Workspace performance: 8 right-panel tools lazy-loaded via `next/dynamic`;
-  image grids `loading="lazy"`.
+## Remaining release blockers
+
+1. Push the locally tested Cloudflare binding and environment-proxy changes on `arena/01a10cb1-ai-ebook-studio`; wait for the new GitHub and Cloudflare checks.
+2. If Workers Builds still fails, inspect its Dashboard log or share a **redacted error excerpt**. Do not share passwords, API tokens, or secret values.
+3. Verify Render startup with production secrets and the actual Neon/PostgreSQL connection; run and validate the production migration lifecycle.
+4. Configure the Cloudflare runtime/build variables above and perform a deployed smoke test for frontend asset loading, Clerk auth, and calls to the backend health/API routes.
+5. Run an authenticated browser workflow and provider-backed quality checks when the required test sessions and provider credentials are available.
+
+The backend suite passes **203 tests**, and a fresh SQLite database reached migration `20261005_0003` across 19 revisions. `render.yaml` now runs `alembic upgrade head` as a pre-deploy command and requires the deployment owner to supply the real HTTPS CORS origin and `APP_BASE_URL`; these checks do not establish populated PostgreSQL behavior, deployed startup, browser authentication, or live AI quality. Keep PR #1 in draft and do not describe the application as deployed or fully production-ready until the blockers above are resolved.

@@ -14,12 +14,22 @@
 #   Deploy command:      npx wrangler deploy
 #   Production branch:   master       <-- the repo's default branch is master
 #
-# Environment variables (add under Settings -> Variables & Secrets):
+# Environment variables (add as both build variables and Worker runtime vars):
 #   NEXT_PUBLIC_API_BASE_URL            -> https://<backend>.onrender.com/api/v1
+#   BACKEND_URL                         -> https://<backend>.onrender.com (optional
+#                                         when the public API base URL is set)
 #   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-#   CLERK_SECRET_KEY
+#   CLERK_SECRET_KEY (secret; never put its value in this file)
 
 name = "ai-ebook-studio"
 main = ".open-next/worker.js"
 compatibility_date = "2026-07-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+# OpenNext serves Next.js and public files through the ASSETS binding.
+assets = { directory = ".open-next/assets", binding = "ASSETS" }
+
+# Required by OpenNext for worker self-invocation (for example, revalidation).
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "ai-ebook-studio"

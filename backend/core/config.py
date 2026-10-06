@@ -1,6 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -158,6 +159,16 @@ class Settings(BaseSettings):
             errors.append("SECRET_KEY and JWT_SECRET must be different values")
         if self.debug:
             errors.append("DEBUG must be false")
+
+        app_base = urlsplit(self.app_base_url.strip())
+        app_host = (app_base.hostname or "").lower()
+        if (
+            app_base.scheme.lower() != "https"
+            or not app_host
+            or app_host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+            or app_host.endswith(".localhost")
+        ):
+            errors.append("APP_BASE_URL must be a public HTTPS URL in production")
 
         origins = [origin.strip() for origin in self.cors_origins]
         if any(origin == "*" for origin in origins):

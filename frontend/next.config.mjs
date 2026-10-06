@@ -1,5 +1,13 @@
 import path from "node:path";
 
+const publicApiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+const configuredBackendUrl =
+  process.env.BACKEND_URL?.trim() ||
+  (publicApiBaseUrl?.startsWith("http") ? publicApiBaseUrl : undefined);
+const backendOrigin = (
+  configuredBackendUrl?.replace(/\/api\/v1\/?$/, "") ?? "http://127.0.0.1:8000"
+).replace(/\/+$/, "");
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -20,7 +28,7 @@ const nextConfig = {
     return [
       {
         source: "/api/v1/:path*",
-        destination: `${process.env.BACKEND_URL ?? "http://127.0.0.1:8765"}/api/v1/:path*`,
+        destination: `${backendOrigin}/api/v1/:path*`,
       },
     ];
   },

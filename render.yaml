@@ -7,7 +7,7 @@
 #   4. Note: background jobs + WebSockets run in-process, so keep this service
 #      as a single instance (no scaling) — the plan's default is fine.
 #
-# Health check uses /docs (the API has no /health route; /docs returns 200).
+# Health check uses the backend readiness probe; migrations run in Render's pre-deploy step.
 services:
   - type: web
     name: ai-ebook-studio-api
@@ -15,6 +15,7 @@ services:
     rootDir: backend
     plan: starter
     buildCommand: pip install -r requirements.txt
+    preDeployCommand: alembic upgrade head
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/ready
     autoDeploy: true
@@ -44,12 +45,12 @@ services:
         sync: false
       - key: CLERK_JWKS_URL
         sync: false
-      # --- CORS: allow the Cloudflare-hosted frontend ---
+      # --- Frontend URL (set to the actual deployed Cloudflare Worker/custom domain) ---
       - key: CORS_ORIGINS
-        value: https://ai-ebook-studio.pages.dev
-      # --- Emails (password reset / verification) ---
+        sync: false
       - key: APP_BASE_URL
-        value: https://ai-ebook-studio.pages.dev
+        sync: false
+      # --- Emails (password reset / verification) ---
       - key: EMAIL_FROM
         value: "AI Ebook Studio <no-reply@ai-ebook.studio>"
       - key: SMTP_HOST
